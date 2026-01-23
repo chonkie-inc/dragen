@@ -5,6 +5,12 @@
 //! - Executor Agent: Generates content for each section
 //! - Summary Agent: Creates executive summary
 //!
+//! This example demonstrates key dragen features:
+//! - **`<finish>` blocks**: Agents return structured JSON directly without code execution
+//! - **Typed outputs**: Results are automatically deserialized to Rust structs
+//! - **Error feedback**: If JSON is malformed, the LLM gets feedback to self-correct
+//! - **Tool registration**: The search tool shows how to expose functions to the sandbox
+//!
 //! Run with:
 //!   EXA_API_KEY=your_key GROQ_API_KEY=your_key cargo run --example deep_research_pipeline "topic"
 
@@ -176,14 +182,8 @@ fn create_planner_agent() -> Agent {
     let mut agent = Agent::new(config);
     register_search_tool(&mut agent);
 
-    // Custom finish expecting {plan, outline}
-    let finish_info = ToolInfo::new("finish", "Return the research plan and outline")
-        .arg_required("result", "dict", "Dict with 'plan' (str) and 'outline' (dict with title and sections)")
-        .returns("dict");
-
-    agent.register_finish(finish_info, |args| {
-        args.get(0).cloned().unwrap_or(PyValue::None)
-    });
+    // Note: No register_finish() needed - <finish> blocks are handled directly by the framework
+    // and deserialized to the typed PlannerOutput struct
 
     agent
 }
@@ -218,42 +218,17 @@ CONTENT REQUIREMENTS:
 - Add bullet points for lists of features, players, or trends
 - Include a comparison table or matrix where appropriate using markdown
 
-EXAMPLE OUTPUT STRUCTURE:
-```python
-finish({
-    "content": """The competitive intelligence market has experienced remarkable growth...
+WHEN READY TO FINISH, use a <finish> block with valid JSON:
 
-### Market Size and Projections
-
-The global market was valued at $X billion in 2024, with projections reaching $Y billion by 2030, representing a CAGR of Z%. Key factors driving this growth include...
-
-**Regional Breakdown:**
-- North America: $X billion (largest market)
-- Asia Pacific: Fastest growing at X% CAGR
-- Europe: Steady growth driven by...
-
-### Key Growth Drivers
-
-Several factors are accelerating market expansion:
-
-1. **Digital Transformation** - Organizations increasingly require...
-2. **AI Integration** - Machine learning capabilities have...
-3. **Competitive Pressure** - Intensifying competition across industries...
-
-### Market Segmentation
-
-| Segment | Market Share | Growth Rate |
-|---------|-------------|-------------|
-| Enterprise | 65% | 12% CAGR |
-| SMB | 35% | 18% CAGR |
-
-The enterprise segment dominates due to...""",
+<finish>
+{
+    "content": "The competitive intelligence market has experienced remarkable growth...\n\n### Market Size and Projections\n\nThe global market was valued at $X billion in 2024...\n\n### Key Growth Drivers\n\n1. **Digital Transformation** - Organizations increasingly require...\n2. **AI Integration** - Machine learning capabilities have...",
     "sources": [
         "https://example.com - Market size report 2024",
         "https://example2.com - Industry analysis"
     ]
-})
-```
+}
+</finish>
 
 CRITICAL RULES:
 - Do NOT include the main section title (## header) - it's added automatically
@@ -262,7 +237,8 @@ CRITICAL RULES:
 - Write MUCH more than 2-3 paragraphs - aim for comprehensive coverage
 - Include specific data points from your research
 - Do NOT repeat information from previous sections
-- Always cite sources with URLs"#;
+- Always cite sources with URLs
+- Use \n for newlines in the JSON content field"#;
 
 fn create_executor_agent() -> Agent {
     let config = AgentConfig::new("moonshotai/kimi-k2-instruct-0905")
@@ -272,14 +248,8 @@ fn create_executor_agent() -> Agent {
     let mut agent = Agent::new(config);
     register_search_tool(&mut agent);
 
-    // Custom finish expecting {content, sources}
-    let finish_info = ToolInfo::new("finish", "Return the section content and sources")
-        .arg_required("result", "dict", "Dict with 'content' (str) and 'sources' (list of str)")
-        .returns("dict");
-
-    agent.register_finish(finish_info, |args| {
-        args.get(0).cloned().unwrap_or(PyValue::None)
-    });
+    // Note: No register_finish() needed - <finish> blocks are handled directly by the framework
+    // and deserialized to the typed ExecutorOutput struct
 
     agent
 }
@@ -292,11 +262,10 @@ const SUMMARY_SYSTEM: &str = r#"You are a research summarizer. You will be given
 
 Your job is to create an executive summary with key insights.
 
-FORMAT: Write Python code in ```python blocks.
+WHEN READY TO FINISH, use a <finish> block with valid JSON:
 
-Create the summary:
-```python
-finish({
+<finish>
+{
     "key_takeaways": [
         "First major insight from the research",
         "Second major insight",
@@ -314,8 +283,8 @@ finish({
         "First risk or challenge",
         "Second risk"
     ]
-})
-```
+}
+</finish>
 
 IMPORTANT:
 - Extract the most important insights from the report
@@ -328,18 +297,11 @@ fn create_summary_agent() -> Agent {
         .max_iterations(5)
         .system(SUMMARY_SYSTEM);
 
-    let mut agent = Agent::new(config);
+    // Note: No tools needed for summary agent - it just reads the report and outputs structured data
+    // No register_finish() needed - <finish> blocks are handled directly by the framework
+    // and deserialized to the typed SummaryOutput struct
 
-    // Custom finish expecting summary structure
-    let finish_info = ToolInfo::new("finish", "Return the executive summary")
-        .arg_required("result", "dict", "Dict with key_takeaways, key_metrics, opportunities, risks")
-        .returns("dict");
-
-    agent.register_finish(finish_info, |args| {
-        args.get(0).cloned().unwrap_or(PyValue::None)
-    });
-
-    agent
+    Agent::new(config)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
