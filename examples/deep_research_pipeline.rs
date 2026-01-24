@@ -15,9 +15,11 @@
 //!   EXA_API_KEY=your_key GROQ_API_KEY=your_key cargo run --example deep_research_pipeline "topic"
 
 use dragen::{Agent, AgentConfig};
+use futures::future::join_all;
 use litter::{PyValue, ToolInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::sync::{Arc, Mutex};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EXA SEARCH TOOL (shared across agents)
@@ -50,14 +52,25 @@ struct ExaSearchResponse {
     results: Vec<ExaResult>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ExaResult {
     title: String,
     url: String,
     text: Option<String>,
 }
 
-fn search_web(query: String, num_results: i64) -> PyValue {
+/// Captured search result for sharing between agents
+#[derive(Clone)]
+struct CapturedSearch {
+    query: String,
+    results: Vec<ExaResult>,
+}
+
+/// Shared search log type
+type SearchLog = Arc<Mutex<Vec<CapturedSearch>>>;
+
+/// Search the web and optionally capture results to a shared log
+fn search_web(query: String, num_results: i64, search_log: Option<SearchLog>) -> PyValue {
     let api_key = match env::var("EXA_API_KEY") {
         Ok(key) => key,
         Err(_) => return PyValue::Str("Error: EXA_API_KEY not set".to_string()),
@@ -68,7 +81,7 @@ fn search_web(query: String, num_results: i64) -> PyValue {
         num_results: num_results.max(1).min(10) as u32,
         search_type: "auto".to_string(),
         contents: ExaContents {
-            text: ExaTextConfig { max_characters: 2000 },
+            text: ExaTextConfig { max_characters: 8000 },  // Increased from 2000
         },
     };
 
@@ -80,6 +93,16 @@ fn search_web(query: String, num_results: i64) -> PyValue {
     match response {
         Ok(mut resp) => match resp.body_mut().read_json::<ExaSearchResponse>() {
             Ok(data) => {
+                // Capture results to shared log if provided
+                if let Some(log) = search_log {
+                    if let Ok(mut log) = log.lock() {
+                        log.push(CapturedSearch {
+                            query: query.clone(),
+                            results: data.results.clone(),
+                        });
+                    }
+                }
+
                 let results: Vec<PyValue> = data
                     .results
                     .into_iter()
@@ -100,16 +123,22 @@ fn search_web(query: String, num_results: i64) -> PyValue {
     }
 }
 
+/// Register search tool without capturing results
 fn register_search_tool(agent: &mut Agent) {
+    register_search_tool_with_log(agent, None);
+}
+
+/// Register search tool with optional result capture
+fn register_search_tool_with_log(agent: &mut Agent, search_log: Option<SearchLog>) {
     let search_info = ToolInfo::new("search", "Search the web for information on a topic")
         .arg_required("query", "str", "The search query")
         .arg_optional("limit", "int", "Number of results (1-10, default 5)")
         .returns("list");
 
-    agent.register_tool(search_info, |args| {
+    agent.register_tool(search_info, move |args| {
         let query = args.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let limit = args.get(1).and_then(|v| v.as_int()).unwrap_or(5);
-        search_web(query, limit)
+        search_web(query, limit, search_log.clone())
     });
 }
 
@@ -174,14 +203,14 @@ REQUIREMENTS:
 - Plan should include specific search queries for each section
 - Include what metrics and data points to look for"#;
 
-fn create_planner_agent() -> Agent {
+fn create_planner_agent(search_log: Option<SearchLog>) -> Agent {
     // Claude 4.5 Opus for high-quality planning and research strategy
     let config = AgentConfig::new("claude-opus-4-5-20251101")
         .max_iterations(15)
         .system(PLANNER_SYSTEM);
 
     let mut agent = Agent::new(config);
-    register_search_tool(&mut agent);
+    register_search_tool_with_log(&mut agent, search_log);
 
     // Note: No register_finish() needed - <finish> blocks are handled directly by the framework
     // and deserialized to the typed PlannerOutput struct
@@ -308,6 +337,128 @@ fn create_summary_agent() -> Agent {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// REVIEWER AGENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REVIEWER_SYSTEM: &str = r#"<role>
+You are an expert research editor. You review report sections and make targeted edits to improve coherence and remove redundancy.
+</role>
+
+<tools>
+You have access to the following tool:
+
+edit(section, action, text=None, old=None, new=None)
+  - section: int, the section number (1-based)
+  - action: str, one of "prepend", "append", "remove", "replace"
+  - text: str, the text to add (for prepend/append) or remove (for remove)
+  - old: str, the text to find (for replace)
+  - new: str, the replacement text (for replace)
+
+Examples:
+  edit(2, "prepend", text="Building on the market analysis above, ")
+  edit(3, "remove", text="The market is projected to reach $47 billion by 2030.")
+  edit(4, "replace", old="2024", new="2025")
+  edit(5, "append", text="This sets the stage for the challenges ahead.")
+</tools>
+
+<instructions>
+1. Read all sections carefully
+2. Write ONE Python code block with ALL your edit() calls AND finish() at the end
+3. Focus on:
+   - Adding transitions to sections 2+ (prepend a sentence connecting to previous section)
+   - Removing redundant facts that appear in multiple sections
+4. IMPORTANT: Always end your code block with finish("summary of changes made")
+</instructions>
+
+<rules>
+- Make MINIMAL edits - preserve original content
+- Transitions: 1-2 sentences connecting to previous section's theme
+- Only remove TRULY redundant content (exact same facts repeated)
+- For "remove" and "replace", text must match EXACTLY
+- Put ALL edits for this pass in ONE code block
+</rules>"#;
+
+fn create_reviewer_agent(sections: Arc<Mutex<Vec<SectionResult>>>) -> Agent {
+    let config = AgentConfig::new("claude-opus-4-5-20251101")
+        .max_iterations(10)  // Allow retries if some edits fail
+        .system(REVIEWER_SYSTEM);
+
+    let mut agent = Agent::new(config);
+
+    // Register the edit tool
+    let sections_clone = Arc::clone(&sections);
+    let edit_info = ToolInfo::new("edit", "Edit a section of the report")
+        .arg_required("section", "int", "Section number (1-based)")
+        .arg_required("action", "str", "One of: prepend, append, remove, replace")
+        .arg_optional("text", "str", "Text to add (prepend/append) or remove")
+        .arg_optional("old", "str", "Text to find (replace)")
+        .arg_optional("new", "str", "Replacement text (replace)")
+        .returns("str");
+
+    agent.register_tool(edit_info, move |args| {
+        let section_num = args.get(0).and_then(|v| v.as_int()).unwrap_or(0) as usize;
+        let action = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = args.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
+        let old = args.get(3).and_then(|v| v.as_str()).map(|s| s.to_string());
+        let new = args.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let mut sections = sections_clone.lock().unwrap();
+
+        if section_num < 1 || section_num > sections.len() {
+            return PyValue::Str(format!("Error: Invalid section {}", section_num));
+        }
+
+        let section = &mut sections[section_num - 1];
+
+        match action.as_str() {
+            "prepend" => {
+                if let Some(t) = text {
+                    section.content = format!("{}\n\n{}", t, section.content);
+                    PyValue::Str(format!("✓ Prepended to section {}", section_num))
+                } else {
+                    PyValue::Str("Error: 'text' required for prepend".to_string())
+                }
+            }
+            "append" => {
+                if let Some(t) = text {
+                    section.content = format!("{}\n\n{}", section.content, t);
+                    PyValue::Str(format!("✓ Appended to section {}", section_num))
+                } else {
+                    PyValue::Str("Error: 'text' required for append".to_string())
+                }
+            }
+            "remove" => {
+                if let Some(t) = text {
+                    if section.content.contains(&t) {
+                        section.content = section.content.replace(&t, "");
+                        PyValue::Str(format!("✓ Removed from section {}", section_num))
+                    } else {
+                        PyValue::Str(format!("Warning: Text not found in section {}", section_num))
+                    }
+                } else {
+                    PyValue::Str("Error: 'text' required for remove".to_string())
+                }
+            }
+            "replace" => {
+                if let (Some(o), Some(n)) = (old, new) {
+                    if section.content.contains(&o) {
+                        section.content = section.content.replace(&o, &n);
+                        PyValue::Str(format!("✓ Replaced in section {}", section_num))
+                    } else {
+                        PyValue::Str(format!("Warning: Text not found in section {}", section_num))
+                    }
+                } else {
+                    PyValue::Str("Error: 'old' and 'new' required for replace".to_string())
+                }
+            }
+            _ => PyValue::Str(format!("Error: Unknown action '{}'", action))
+        }
+    });
+
+    agent
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // TYPED OUTPUT STRUCTS (using serde for automatic deserialization)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -363,7 +514,11 @@ struct KeyMetric {
     context: String,
 }
 
+// Reviewer returns a simple string summary via finish()
+// (edits are applied via the edit() tool during execution)
+
 /// Internal struct for collecting section results
+#[derive(Clone)]
 struct SectionResult {
     title: String,
     content: String,
@@ -405,7 +560,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ═══════════════════════════════════════════════════════════════════════
     print_separator("PHASE 1: PLANNER AGENT");
 
-    let mut planner = create_planner_agent();
+    // Create shared search log to capture planner's research
+    let search_log: SearchLog = Arc::new(Mutex::new(Vec::new()));
+
+    let mut planner = create_planner_agent(Some(search_log.clone()));
     let planner_task = format!(
         "Create a research plan and outline for this query: {}",
         query
@@ -436,70 +594,169 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 2: EXECUTOR (per section)
+    // PHASE 2: PARALLEL EXECUTOR AGENTS
     // ═══════════════════════════════════════════════════════════════════════
-    print_separator("PHASE 2: EXECUTOR AGENTS");
+    print_separator("PHASE 2: PARALLEL EXECUTOR AGENTS");
 
-    let mut section_results: Vec<SectionResult> = Vec::new();
-    let mut all_sources: Vec<String> = Vec::new();
-
-    for (i, section) in planner_output.outline.sections.iter().enumerate() {
-        println!("\n{}", "─".repeat(60));
-        println!("  Section {}/{}: {}", i + 1, planner_output.outline.sections.len(), section.title);
-        println!("{}\n", "─".repeat(60));
-
-        let mut executor = create_executor_agent();
-
-        // Build context from previous section
-        let previous_context = if let Some(prev) = section_results.last() {
-            format!(
-                "\n\nPREVIOUS SECTION (for context, do not repeat):\n## {}\n{}",
-                prev.title, prev.content
-            )
-        } else {
-            String::new()
-        };
-
-        // Format subsections for the task
-        let subsections_str = if section.subsections.is_empty() {
+    // Extract captured research from planner
+    let captured_research: String = {
+        let log = search_log.lock().unwrap();
+        if log.is_empty() {
             String::new()
         } else {
-            format!("\nSubsections to cover:\n{}",
-                section.subsections.iter()
-                    .map(|s| format!("  - {}", s))
-                    .collect::<Vec<_>>()
-                    .join("\n"))
+            let mut research = String::from("\n\n═══ RESEARCH FROM PLANNER (use this data, search only if needed) ═══\n\n");
+            for (i, search) in log.iter().enumerate() {
+                research.push_str(&format!("── Search {}: \"{}\" ──\n", i + 1, search.query));
+                for result in &search.results {
+                    research.push_str(&format!("\n📄 {}\n", result.title));
+                    research.push_str(&format!("🔗 {}\n", result.url));
+                    if let Some(text) = &result.text {
+                        // Truncate very long texts for context window efficiency
+                        let truncated: String = text.chars().take(4000).collect();
+                        let truncated = if text.len() > truncated.len() {
+                            format!("{}...", truncated)
+                        } else {
+                            truncated
+                        };
+                        research.push_str(&format!("{}\n", truncated));
+                    }
+                    research.push_str("\n");
+                }
+            }
+            research
+        }
+    };
+
+    let total_results: usize = search_log.lock().unwrap().iter().map(|s| s.results.len()).sum();
+    println!("📚 Passing {} search results from planner to executors", total_results);
+    println!("🚀 Launching {} executor agents in parallel...\n", planner_output.outline.sections.len());
+
+    // Share the plan and research across all executors
+    let plan = Arc::new(planner_output.plan.clone());
+    let research = Arc::new(captured_research);
+
+    // Create futures for all sections to run in parallel
+    let executor_futures: Vec<_> = planner_output.outline.sections
+        .iter()
+        .enumerate()
+        .map(|(i, section)| {
+            let plan = Arc::clone(&plan);
+            let research = Arc::clone(&research);
+            let section_title = section.title.clone();
+            let section_description = section.description.clone();
+            let subsections = section.subsections.clone();
+            let section_num = i + 1;
+            let total_sections = planner_output.outline.sections.len();
+
+            async move {
+                println!("  ▶ Starting section {}/{}: {}", section_num, total_sections, section_title);
+
+                let mut executor = create_executor_agent();
+
+                // Format subsections for the task
+                let subsections_str = if subsections.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nSubsections to cover:\n{}",
+                        subsections.iter()
+                            .map(|s| format!("  - {}", s))
+                            .collect::<Vec<_>>()
+                            .join("\n"))
+                };
+
+                let executor_task = format!(
+                    "RESEARCH PLAN:\n{}\n\nCURRENT SECTION TO WRITE:\nTitle: {}\nDescription: {}{}{}\n\nIMPORTANT: Use the research data provided above. Only search if you need additional specific information not covered.\n\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection.",
+                    plan, section_title, section_description, subsections_str, research
+                );
+
+                // Typed output - no manual extraction needed!
+                match executor.run::<ExecutorOutput>(&executor_task).await {
+                    Ok(output) => {
+                        println!("  ✅ Section {}/{} complete: {}", section_num, total_sections, section_title);
+                        SectionResult {
+                            title: section_title,
+                            content: output.content,
+                            sources: output.sources,
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ⚠️ Section {}/{} error: {}", section_num, total_sections, e);
+                        SectionResult {
+                            title: section_title,
+                            content: format!("[Error: {}]", e),
+                            sources: vec![],
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Run all executors in parallel
+    let raw_section_results: Vec<SectionResult> = join_all(executor_futures).await;
+
+    println!("\n✅ All {} sections generated in parallel", raw_section_results.len());
+
+    // Collect all sources before review
+    let mut all_sources: Vec<String> = raw_section_results
+        .iter()
+        .flat_map(|s| s.sources.clone())
+        .collect();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 2.5: REVIEWER AGENT (edit tool with retry capability)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Check if reviewer is enabled (set SKIP_REVIEWER=1 to disable)
+    let skip_reviewer = env::var("SKIP_REVIEWER").is_ok();
+
+    let section_results: Vec<SectionResult> = if skip_reviewer {
+        println!("⏭️  Skipping reviewer (SKIP_REVIEWER is set)\n");
+        raw_section_results
+    } else {
+        print_separator("PHASE 2.5: REVIEWER AGENT (OPUS)");
+
+        // Shared sections that the reviewer can edit via the edit() tool
+        let shared_sections: Arc<Mutex<Vec<SectionResult>>> = Arc::new(Mutex::new(raw_section_results));
+
+        // Build the content for the reviewer to see
+        let sections_content: String = {
+            let sections = shared_sections.lock().unwrap();
+            sections
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    format!(
+                        "=== SECTION {} ===\nTitle: {}\n\n{}\n",
+                        i + 1, s.title, s.content
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
-        let executor_task = format!(
-            "RESEARCH PLAN:\n{}\n\nCURRENT SECTION TO WRITE:\nTitle: {}\nDescription: {}{}{}\n\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection.",
-            planner_output.plan, section.title, section.description, subsections_str, previous_context
+        let reviewer_task = format!(
+            "Review this research report titled: \"{}\"\n\n{}\n\nUse edit() to add transitions to sections 2+ and remove redundant content. Put all edits in ONE code block. When done, call finish(\"summary\").",
+            planner_output.outline.title, sections_content
         );
 
-        // Typed output - no manual extraction needed!
-        match executor.run::<ExecutorOutput>(&executor_task).await {
-            Ok(output) => {
-                println!("✅ Section complete");
-                println!("📄 Preview: {}...", output.content.chars().take(200).collect::<String>());
-                println!("📚 Sources: {}", output.sources.len());
+        println!("📝 Reviewing {} sections...\n", shared_sections.lock().unwrap().len());
 
-                all_sources.extend(output.sources.clone());
-                section_results.push(SectionResult {
-                    title: section.title.clone(),
-                    content: output.content,
-                    sources: output.sources,
-                });
+        let mut reviewer = create_reviewer_agent(Arc::clone(&shared_sections));
+
+        match reviewer.run::<String>(&reviewer_task).await {
+            Ok(summary) => {
+                println!("✅ Review complete: {}", summary);
             }
             Err(e) => {
-                eprintln!("⚠️ Executor error: {}", e);
-                section_results.push(SectionResult {
-                    title: section.title.clone(),
-                    content: format!("[Error: {}]", e),
-                    sources: vec![],
-                });
+                eprintln!("⚠️ Reviewer error: {}. Using sections as-is.", e);
             }
         }
-    }
+
+        // Extract the edited sections
+        let sections = shared_sections.lock().unwrap();
+        sections.clone()
+    };
 
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 3: SUMMARY

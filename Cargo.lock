@@ -212,6 +212,7 @@ dependencies = [
 name = "dragen"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "litter",
  "regex",
  "serde",
