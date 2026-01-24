@@ -3,10 +3,11 @@
 //! The agent uses an LLM to generate Python code which is executed in a
 //! secure Litter sandbox. Tools are exposed as Python functions.
 
+use crate::context::Context;
 use crate::error::{Error, Result};
 use litter::{PyValue, Sandbox, ToolInfo};
 use regex::Regex;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use std::sync::{Arc, Mutex};
 use tanukie::{Client, Message, Role};
 
@@ -119,6 +120,12 @@ pub struct Agent {
     finish_regex: Regex,
     /// Holds the final answer when finish() is called (as structured PyValue)
     finish_answer: Arc<Mutex<Option<PyValue>>>,
+    /// Shared context for data passing between agents
+    context: Option<Context>,
+    /// Keys to read from context and inject into prompt
+    context_reads: Vec<String>,
+    /// Key to write output to in context
+    context_write: Option<String>,
 }
 
 impl Agent {
@@ -134,6 +141,9 @@ impl Agent {
             // Match <finish>...</finish> blocks for direct structured output
             finish_regex: Regex::new(r"<finish>\s*([\s\S]*?)</finish>").unwrap(),
             finish_answer: Arc::new(Mutex::new(None)),
+            context: None,
+            context_reads: Vec::new(),
+            context_write: None,
         }
     }
 
@@ -167,6 +177,53 @@ impl Agent {
     /// Create a new agent with default configuration.
     pub fn with_model(model: impl Into<String>) -> Self {
         Self::new(AgentConfig::new(model))
+    }
+
+    /// Read data from a shared context and inject it into the agent's prompt.
+    ///
+    /// The context value is automatically formatted and included in the task prompt,
+    /// so the agent can see the data without making any tool calls.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let ctx = Context::new();
+    /// ctx.set("plan", &planner_output);
+    ///
+    /// let mut executor = Agent::new(config)
+    ///     .from_context(&ctx, "plan")
+    ///     .from_context(&ctx, "search_log");
+    /// ```
+    pub fn from_context(mut self, ctx: &Context, key: &str) -> Self {
+        if self.context.is_none() {
+            self.context = Some(ctx.clone());
+        }
+        self.context_reads.push(key.to_string());
+        self
+    }
+
+    /// Save the agent's output to a shared context.
+    ///
+    /// When the agent finishes (via `finish()` or `<finish>` block), the output
+    /// is automatically stored in the context under the specified key.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let ctx = Context::new();
+    ///
+    /// let mut planner = Agent::new(config)
+    ///     .to_context(&ctx, "plan");
+    /// planner.run::<PlannerOutput>(&query).await?;
+    ///
+    /// // ctx now contains "plan" -> PlannerOutput
+    /// ```
+    pub fn to_context(mut self, ctx: &Context, key: &str) -> Self {
+        if self.context.is_none() {
+            self.context = Some(ctx.clone());
+        }
+        self.context_write = Some(key.to_string());
+        self
     }
 
     /// Register a tool with the agent's sandbox.
@@ -232,6 +289,42 @@ impl Agent {
             "No tools available.".to_string()
         } else {
             docs
+        }
+    }
+
+    /// Inject context data into the task prompt.
+    fn inject_context_into_task(&self, task: &str) -> String {
+        let Some(ctx) = &self.context else {
+            return task.to_string();
+        };
+
+        if self.context_reads.is_empty() {
+            return task.to_string();
+        }
+
+        let mut injections = Vec::new();
+        for key in &self.context_reads {
+            if let Some(value) = ctx.get_raw(key) {
+                let formatted = serde_json::to_string_pretty(&value).unwrap_or_default();
+                injections.push(format!("=== {} ===\n{}", key.to_uppercase(), formatted));
+            }
+        }
+
+        if injections.is_empty() {
+            task.to_string()
+        } else {
+            format!(
+                "<context>\n{}\n</context>\n\n{}",
+                injections.join("\n\n"),
+                task
+            )
+        }
+    }
+
+    /// Save the result to context if configured.
+    fn save_to_context<T: Serialize>(&self, result: &T) {
+        if let (Some(ctx), Some(key)) = (&self.context, &self.context_write) {
+            ctx.set(key, result);
         }
     }
 
@@ -303,6 +396,9 @@ impl Agent {
     /// - `String`: Returns the string representation of the finish value
     /// - Any struct implementing `DeserializeOwned`: Deserializes the finish value
     ///
+    /// If the agent is configured with `to_context()`, the result is automatically
+    /// saved to the shared context.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -319,7 +415,7 @@ impl Agent {
     /// ```
     pub async fn run<T>(&mut self, task: &str) -> Result<T>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Serialize,
     {
         // Ensure finish tool exists (registers default if no custom one)
         self.ensure_finish_tool();
@@ -328,6 +424,9 @@ impl Agent {
         if let Ok(mut fa) = self.finish_answer.lock() {
             *fa = None;
         }
+
+        // Inject context data into the task
+        let task_with_context = self.inject_context_into_task(task);
 
         // Initialize conversation with system prompt and user task
         self.messages.clear();
@@ -339,7 +438,7 @@ impl Agent {
         });
         self.messages.push(Message {
             role: Role::User,
-            content: task.to_string(),
+            content: task_with_context,
             name: None,
             tool_call_id: None,
         });
@@ -368,7 +467,10 @@ impl Agent {
             if let Some(finish_content) = self.extract_finish(&text) {
                 // Try to parse the content as JSON
                 match serde_json::from_str::<T>(&finish_content) {
-                    Ok(result) => return Ok(result),
+                    Ok(result) => {
+                        self.save_to_context(&result);
+                        return Ok(result);
+                    }
                     Err(e) => {
                         // Give the LLM feedback with the exact error and its output
                         iterations += 1;
@@ -406,7 +508,10 @@ impl Agent {
                         if let Some(value) = fa.as_ref() {
                             let json = pyvalue_to_json(value);
                             match serde_json::from_value::<T>(json.clone()) {
-                                Ok(result) => return Ok(result),
+                                Ok(result) => {
+                                    self.save_to_context(&result);
+                                    return Ok(result);
+                                }
                                 Err(e) => {
                                     // Give the LLM feedback with the exact error and its output
                                     if iterations >= self.config.max_iterations {
@@ -449,12 +554,14 @@ impl Agent {
             } else {
                 // No code block or finish block - agent is done (fallback behavior)
                 // Try to deserialize the text as JSON, or wrap as string
-                return serde_json::from_str(&text)
+                let result: T = serde_json::from_str(&text)
                     .or_else(|_| {
                         // If text isn't valid JSON, wrap it as a JSON string for String return type
                         serde_json::from_value(serde_json::Value::String(text))
                     })
-                    .map_err(|e| Error::Deserialization(e.to_string()));
+                    .map_err(|e| Error::Deserialization(e.to_string()))?;
+                self.save_to_context(&result);
+                return Ok(result);
             }
         }
     }

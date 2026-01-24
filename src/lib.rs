@@ -29,11 +29,33 @@
 //!     println!("{}", result);
 //! }
 //! ```
+//!
+//! # Sharing Data Between Agents
+//!
+//! Use `Context` to pass data between agents without manual Arc/Mutex management:
+//!
+//! ```ignore
+//! use dragen::{Agent, AgentConfig, Context};
+//!
+//! let ctx = Context::new();
+//!
+//! // Planner writes output to context
+//! let mut planner = Agent::new(AgentConfig::new("gpt-4o"))
+//!     .to_context(&ctx, "plan");
+//! planner.run::<PlanOutput>(&query).await?;
+//!
+//! // Executor reads from context (injected into prompt)
+//! let mut executor = Agent::new(AgentConfig::new("gpt-4o"))
+//!     .from_context(&ctx, "plan");
+//! executor.run::<String>("Execute the plan").await?;
+//! ```
 
 mod agent;
+mod context;
 mod error;
 
 pub use agent::{pyvalue_to_json, Agent, AgentConfig};
+pub use context::Context;
 pub use error::{Error, Result};
 
 // Re-export litter for convenience

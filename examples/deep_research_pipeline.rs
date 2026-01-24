@@ -14,7 +14,7 @@
 //! Run with:
 //!   EXA_API_KEY=your_key GROQ_API_KEY=your_key cargo run --example deep_research_pipeline "topic"
 
-use dragen::{Agent, AgentConfig};
+use dragen::{Agent, AgentConfig, Context};
 use futures::future::join_all;
 use litter::{PyValue, ToolInfo};
 use serde::{Deserialize, Serialize};
@@ -463,19 +463,19 @@ fn create_reviewer_agent(sections: Arc<Mutex<Vec<SectionResult>>>) -> Agent {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Planner agent output
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PlannerOutput {
     plan: String,
     outline: Outline,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Outline {
     title: String,
     sections: Vec<Section>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Section {
     title: String,
     description: String,
@@ -484,7 +484,7 @@ struct Section {
 }
 
 /// Executor agent output
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ExecutorOutput {
     content: String,
     #[serde(default)]
@@ -492,7 +492,7 @@ struct ExecutorOutput {
 }
 
 /// Summary agent output
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct SummaryOutput {
     #[serde(default)]
     key_takeaways: Vec<String>,
@@ -504,7 +504,7 @@ struct SummaryOutput {
     risks: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct KeyMetric {
     #[serde(default)]
     metric: String,
@@ -555,6 +555,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Query: {}", query);
     println!("{}\n", "═".repeat(70));
 
+    // Create shared context for passing data between agents
+    let ctx = Context::new();
+
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 1: PLANNER
     // ═══════════════════════════════════════════════════════════════════════
@@ -563,7 +566,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared search log to capture planner's research
     let search_log: SearchLog = Arc::new(Mutex::new(Vec::new()));
 
-    let mut planner = create_planner_agent(Some(search_log.clone()));
+    let mut planner = create_planner_agent(Some(search_log.clone()))
+        .to_context(&ctx, "plan");  // Output automatically saved to context
     let planner_task = format!(
         "Create a research plan and outline for this query: {}",
         query
@@ -571,7 +575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("📋 Task: {}\n", planner_task);
 
-    // Typed output - no manual extraction needed!
+    // Typed output - automatically saved to context via to_context()
     let planner_output: PlannerOutput = match planner.run::<PlannerOutput>(&planner_task).await {
         Ok(output) => {
             println!("✅ Planner completed\n");
@@ -598,13 +602,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ═══════════════════════════════════════════════════════════════════════
     print_separator("PHASE 2: PARALLEL EXECUTOR AGENTS");
 
-    // Extract captured research from planner
-    let captured_research: String = {
+    // Extract captured research from planner and save to context
+    let total_results: usize = {
         let log = search_log.lock().unwrap();
-        if log.is_empty() {
-            String::new()
-        } else {
-            let mut research = String::from("\n\n═══ RESEARCH FROM PLANNER (use this data, search only if needed) ═══\n\n");
+        let total = log.iter().map(|s| s.results.len()).sum();
+
+        if !log.is_empty() {
+            let mut research = String::from("═══ RESEARCH FROM PLANNER (use this data, search only if needed) ═══\n\n");
             for (i, search) in log.iter().enumerate() {
                 research.push_str(&format!("── Search {}: \"{}\" ──\n", i + 1, search.query));
                 for result in &search.results {
@@ -623,25 +627,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     research.push_str("\n");
                 }
             }
-            research
+            // Save research to context for executors to read
+            ctx.set("search_log", &research);
         }
+
+        total
     };
 
-    let total_results: usize = search_log.lock().unwrap().iter().map(|s| s.results.len()).sum();
-    println!("📚 Passing {} search results from planner to executors", total_results);
+    println!("📚 Passing {} search results from planner to executors via Context", total_results);
     println!("🚀 Launching {} executor agents in parallel...\n", planner_output.outline.sections.len());
 
-    // Share the plan and research across all executors
-    let plan = Arc::new(planner_output.plan.clone());
-    let research = Arc::new(captured_research);
-
     // Create futures for all sections to run in parallel
+    // Each executor reads from shared context (plan + search_log)
     let executor_futures: Vec<_> = planner_output.outline.sections
         .iter()
         .enumerate()
         .map(|(i, section)| {
-            let plan = Arc::clone(&plan);
-            let research = Arc::clone(&research);
+            let ctx = ctx.clone();  // Cheap clone (Arc-based)
             let section_title = section.title.clone();
             let section_description = section.description.clone();
             let subsections = section.subsections.clone();
@@ -651,7 +653,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             async move {
                 println!("  ▶ Starting section {}/{}: {}", section_num, total_sections, section_title);
 
-                let mut executor = create_executor_agent();
+                // Executor reads plan and search_log from context (auto-injected into prompt)
+                let mut executor = create_executor_agent()
+                    .from_context(&ctx, "plan")
+                    .from_context(&ctx, "search_log");
 
                 // Format subsections for the task
                 let subsections_str = if subsections.is_empty() {
@@ -664,9 +669,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .join("\n"))
                 };
 
+                // Task is now simpler - context (plan + research) is auto-injected
                 let executor_task = format!(
-                    "RESEARCH PLAN:\n{}\n\nCURRENT SECTION TO WRITE:\nTitle: {}\nDescription: {}{}{}\n\nIMPORTANT: Use the research data provided above. Only search if you need additional specific information not covered.\n\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection.",
-                    plan, section_title, section_description, subsections_str, research
+                    "CURRENT SECTION TO WRITE:\nTitle: {}\nDescription: {}{}\n\nIMPORTANT: Use the research data from the context above. Only search if you need additional specific information not covered.\n\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection.",
+                    section_title, section_description, subsections_str
                 );
 
                 // Typed output - no manual extraction needed!
@@ -698,7 +704,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✅ All {} sections generated in parallel", raw_section_results.len());
 
     // Collect all sources before review
-    let mut all_sources: Vec<String> = raw_section_results
+    let all_sources: Vec<String> = raw_section_results
         .iter()
         .flat_map(|s| s.sources.clone())
         .collect();
