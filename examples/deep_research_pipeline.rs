@@ -175,7 +175,8 @@ REQUIREMENTS:
 - Include what metrics and data points to look for"#;
 
 fn create_planner_agent() -> Agent {
-    let config = AgentConfig::new("moonshotai/kimi-k2-instruct-0905")
+    // Claude 4.5 Opus for high-quality planning and research strategy
+    let config = AgentConfig::new("claude-opus-4-5-20251101")
         .max_iterations(15)
         .system(PLANNER_SYSTEM);
 
@@ -241,7 +242,8 @@ CRITICAL RULES:
 - Use \n for newlines in the JSON content field"#;
 
 fn create_executor_agent() -> Agent {
-    let config = AgentConfig::new("moonshotai/kimi-k2-instruct-0905")
+    // Gemini 3 Flash for fast, cost-effective section generation
+    let config = AgentConfig::new("gemini-3-flash-preview")
         .max_iterations(15)  // Allow more iterations for thorough research
         .system(EXECUTOR_SYSTEM);
 
@@ -293,7 +295,8 @@ IMPORTANT:
 - Focus on actionable insights"#;
 
 fn create_summary_agent() -> Agent {
-    let config = AgentConfig::new("moonshotai/kimi-k2-instruct-0905")
+    // Gemini 3 Flash for fast summarization
+    let config = AgentConfig::new("gemini-3-flash-preview")
         .max_iterations(5)
         .system(SUMMARY_SYSTEM);
 
