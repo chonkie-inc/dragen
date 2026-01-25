@@ -7,7 +7,7 @@
 //!   EXA_API_KEY=your_key GROQ_API_KEY=your_key cargo run --example deep_research_agent
 
 use dragen::{Agent, AgentConfig};
-use litter::{PyValue, ToolInfo};
+use littrs::{PyValue, ToolInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
 

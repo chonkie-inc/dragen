@@ -1,11 +1,11 @@
 //! CodeAct-style agent implementation.
 //!
 //! The agent uses an LLM to generate Python code which is executed in a
-//! secure Litter sandbox. Tools are exposed as Python functions.
+//! secure Littrs sandbox. Tools are exposed as Python functions.
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use litter::{PyValue, Sandbox, ToolInfo};
+use littrs::{PyValue, Sandbox, ToolInfo};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::{Arc, Mutex};
@@ -99,6 +99,12 @@ impl AgentConfig {
     /// Set the max tokens.
     pub fn max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = Some(n);
+        self
+    }
+
+    /// Remove the max tokens limit (let the model use its default).
+    pub fn no_max_tokens(mut self) -> Self {
+        self.max_tokens = None;
         self
     }
 
@@ -232,7 +238,7 @@ impl Agent {
     /// ```ignore
     /// agent.register(my_tool::Tool);
     /// ```
-    pub fn register<T: litter::Tool + 'static>(&mut self, tool: T) {
+    pub fn register<T: littrs::Tool + 'static>(&mut self, tool: T) {
         self.sandbox.register(tool);
     }
 

@@ -11,7 +11,7 @@ pub enum Error {
 
     /// Sandbox execution error
     #[error("Sandbox error: {0}")]
-    Sandbox(#[from] litter::Error),
+    Sandbox(#[from] littrs::Error),
 
     /// No code found in LLM response
     #[error("No code block found in response")]

@@ -2,7 +2,7 @@
 name = "dragen"
 version = "0.1.0"
 edition = "2024"
-description = "CodeAct-style agent framework using Litter sandbox"
+description = "CodeAct-style agent framework using Littrs sandbox"
 license = "Apache-2.0"
 
 [dependencies]
@@ -10,7 +10,7 @@ license = "Apache-2.0"
 tanukie = { path = "../tanukie" }
 
 # Python sandbox
-litter = { path = "../litter/crates/litter", features = ["macros"] }
+littrs = { path = "../litter/crates/littrs", features = ["macros"] }
 
 # Async runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }

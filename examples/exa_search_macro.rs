@@ -6,7 +6,7 @@
 //!   EXA_API_KEY=your_key GROQ_API_KEY=your_key cargo run --example exa_search_macro
 
 use dragen::{Agent, AgentConfig};
-use litter::{tool, PyValue};
+use littrs::{tool, PyValue};
 use serde::{Deserialize, Serialize};
 use std::env;
 

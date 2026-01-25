@@ -16,7 +16,7 @@
 
 use dragen::{Agent, AgentConfig, Context};
 use futures::future::join_all;
-use litter::{PyValue, ToolInfo};
+use littrs::{PyValue, ToolInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -69,8 +69,17 @@ struct CapturedSearch {
 /// Shared search log type
 type SearchLog = Arc<Mutex<Vec<CapturedSearch>>>;
 
+/// Counter for search API calls
+type SearchCounter = Arc<Mutex<usize>>;
+
 /// Search the web and optionally capture results to a shared log
-fn search_web(query: String, num_results: i64, search_log: Option<SearchLog>) -> PyValue {
+fn search_web(query: String, num_results: i64, search_log: Option<SearchLog>, search_counter: Option<SearchCounter>) -> PyValue {
+    // Increment search counter
+    if let Some(counter) = &search_counter {
+        if let Ok(mut count) = counter.lock() {
+            *count += 1;
+        }
+    }
     let api_key = match env::var("EXA_API_KEY") {
         Ok(key) => key,
         Err(_) => return PyValue::Str("Error: EXA_API_KEY not set".to_string()),
@@ -124,12 +133,12 @@ fn search_web(query: String, num_results: i64, search_log: Option<SearchLog>) ->
 }
 
 /// Register search tool without capturing results
-fn register_search_tool(agent: &mut Agent) {
-    register_search_tool_with_log(agent, None);
+fn register_search_tool(agent: &mut Agent, search_counter: Option<SearchCounter>) {
+    register_search_tool_with_log(agent, None, search_counter);
 }
 
 /// Register search tool with optional result capture
-fn register_search_tool_with_log(agent: &mut Agent, search_log: Option<SearchLog>) {
+fn register_search_tool_with_log(agent: &mut Agent, search_log: Option<SearchLog>, search_counter: Option<SearchCounter>) {
     let search_info = ToolInfo::new("search", "Search the web for information on a topic")
         .arg_required("query", "str", "The search query")
         .arg_optional("limit", "int", "Number of results (1-10, default 5)")
@@ -138,7 +147,7 @@ fn register_search_tool_with_log(agent: &mut Agent, search_log: Option<SearchLog
     agent.register_tool(search_info, move |args| {
         let query = args.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let limit = args.get(1).and_then(|v| v.as_int()).unwrap_or(5);
-        search_web(query, limit, search_log.clone())
+        search_web(query, limit, search_log.clone(), search_counter.clone())
     });
 }
 
@@ -203,14 +212,14 @@ REQUIREMENTS:
 - Plan should include specific search queries for each section
 - Include what metrics and data points to look for"#;
 
-fn create_planner_agent(search_log: Option<SearchLog>) -> Agent {
+fn create_planner_agent(search_log: Option<SearchLog>, search_counter: Option<SearchCounter>) -> Agent {
     // Claude 4.5 Opus for high-quality planning and research strategy
     let config = AgentConfig::new("claude-opus-4-5-20251101")
         .max_iterations(15)
         .system(PLANNER_SYSTEM);
 
     let mut agent = Agent::new(config);
-    register_search_tool_with_log(&mut agent, search_log);
+    register_search_tool_with_log(&mut agent, search_log, search_counter);
 
     // Note: No register_finish() needed - <finish> blocks are handled directly by the framework
     // and deserialized to the typed PlannerOutput struct
@@ -270,14 +279,15 @@ CRITICAL RULES:
 - Always cite sources with URLs
 - Use \n for newlines in the JSON content field"#;
 
-fn create_executor_agent() -> Agent {
+fn create_executor_agent(search_counter: Option<SearchCounter>) -> Agent {
     // Gemini 3 Flash for fast, cost-effective section generation
     let config = AgentConfig::new("gemini-3-flash-preview")
         .max_iterations(15)  // Allow more iterations for thorough research
+        .no_max_tokens()     // Let the model use its default output length
         .system(EXECUTOR_SYSTEM);
 
     let mut agent = Agent::new(config);
-    register_search_tool(&mut agent);
+    register_search_tool(&mut agent, search_counter);
 
     // Note: No register_finish() needed - <finish> blocks are handled directly by the framework
     // and deserialized to the typed ExecutorOutput struct
@@ -558,6 +568,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared context for passing data between agents
     let ctx = Context::new();
 
+    // Create shared search counter to track API calls
+    let search_counter: SearchCounter = Arc::new(Mutex::new(0));
+
     // ═══════════════════════════════════════════════════════════════════════
     // PHASE 1: PLANNER
     // ═══════════════════════════════════════════════════════════════════════
@@ -566,7 +579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared search log to capture planner's research
     let search_log: SearchLog = Arc::new(Mutex::new(Vec::new()));
 
-    let mut planner = create_planner_agent(Some(search_log.clone()))
+    let mut planner = create_planner_agent(Some(search_log.clone()), Some(search_counter.clone()))
         .to_context(&ctx, "plan");  // Output automatically saved to context
     let planner_task = format!(
         "Create a research plan and outline for this query: {}",
@@ -644,6 +657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enumerate()
         .map(|(i, section)| {
             let ctx = ctx.clone();  // Cheap clone (Arc-based)
+            let search_counter = search_counter.clone();
             let section_title = section.title.clone();
             let section_description = section.description.clone();
             let subsections = section.subsections.clone();
@@ -654,7 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  ▶ Starting section {}/{}: {}", section_num, total_sections, section_title);
 
                 // Executor reads plan and search_log from context (auto-injected into prompt)
-                let mut executor = create_executor_agent()
+                let mut executor = create_executor_agent(Some(search_counter))
                     .from_context(&ctx, "plan")
                     .from_context(&ctx, "search_log");
 
@@ -792,61 +806,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // FINAL OUTPUT
+    // FINAL OUTPUT - Build markdown and write to file
     // ═══════════════════════════════════════════════════════════════════════
     print_separator("FINAL RESEARCH REPORT");
 
+    let mut markdown = String::new();
+
     // Report Title
-    println!("# {}\n", planner_output.outline.title);
+    markdown.push_str(&format!("# {}\n\n", planner_output.outline.title));
 
     // Executive Summary (at the top, after title)
     if let Some(ref summary) = summary {
-        println!("## Executive Summary\n");
+        markdown.push_str("## Executive Summary\n\n");
 
         if !summary.key_takeaways.is_empty() {
-            println!("**Key Takeaways:**");
+            markdown.push_str("**Key Takeaways:**\n");
             for (i, takeaway) in summary.key_takeaways.iter().enumerate() {
-                println!("{}. {}", i + 1, takeaway);
+                markdown.push_str(&format!("{}. {}\n", i + 1, takeaway));
             }
-            println!();
+            markdown.push('\n');
         }
 
         if !summary.key_metrics.is_empty() {
-            println!("**Key Metrics:**");
+            markdown.push_str("**Key Metrics:**\n");
             for metric in &summary.key_metrics {
-                println!("- **{}**: {} ({})", metric.metric, metric.value, metric.context);
+                markdown.push_str(&format!("- **{}**: {} ({})\n", metric.metric, metric.value, metric.context));
             }
-            println!();
+            markdown.push('\n');
         }
 
         if !summary.opportunities.is_empty() {
-            println!("**Opportunities:**");
+            markdown.push_str("**Opportunities:**\n");
             for opp in &summary.opportunities {
-                println!("- {}", opp);
+                markdown.push_str(&format!("- {}\n", opp));
             }
-            println!();
+            markdown.push('\n');
         }
 
         if !summary.risks.is_empty() {
-            println!("**Risks & Challenges:**");
+            markdown.push_str("**Risks & Challenges:**\n");
             for risk in &summary.risks {
-                println!("- {}", risk);
+                markdown.push_str(&format!("- {}\n", risk));
             }
-            println!();
+            markdown.push('\n');
         }
 
-        println!("{}\n", "─".repeat(50));
+        markdown.push_str("---\n\n");
     }
 
     // Section Content
     for section in &section_results {
-        println!("## {}\n", section.title);
-        println!("{}\n", section.content);
+        markdown.push_str(&format!("## {}\n\n", section.title));
+        markdown.push_str(&format!("{}\n\n", section.content));
     }
 
     // Sources (deduplicated by URL)
-    if !all_sources.is_empty() {
-        println!("\n## Sources\n");
+    let unique_source_count = if !all_sources.is_empty() {
+        markdown.push_str("## Sources\n\n");
         let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_sources: Vec<&String> = Vec::new();
 
@@ -859,26 +875,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for (i, source) in unique_sources.iter().enumerate() {
-            println!("{}. {}", i + 1, source);
+            markdown.push_str(&format!("{}. {}\n", i + 1, source));
         }
-    }
 
-    // Count unique sources for final message
-    let unique_source_count = {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for source in &all_sources {
-            let url = source.split(" - ").next().unwrap_or(source).trim();
-            seen.insert(url.to_string());
-        }
-        seen.len()
+        unique_sources.len()
+    } else {
+        0
     };
 
+    // Write to file
+    let output_file = "report.md";
+    std::fs::write(output_file, &markdown)?;
+    println!("📄 Report written to: {}", output_file);
+
+    // Also print to stdout
+    println!("\n{}", markdown);
+
     print_separator("PIPELINE COMPLETE");
+
+    let total_searches = *search_counter.lock().unwrap();
+
     println!(
         "Generated {} sections with {} unique sources",
         section_results.len(),
         unique_source_count
     );
+    println!("\n📊 Cost Estimate:");
+    println!("   Exa searches: {} × $0.005 = ${:.3}", total_searches, total_searches as f64 * 0.005);
+    println!("   (LLM token costs not tracked - see tanukie for details)");
 
     Ok(())
 }

@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! use dragen::{Agent, AgentConfig};
-//! use litter::tool;
+//! use littrs::tool;
 //!
 //! /// Get the current weather for a city.
 //! ///
@@ -58,5 +58,5 @@ pub use agent::{pyvalue_to_json, Agent, AgentConfig};
 pub use context::Context;
 pub use error::{Error, Result};
 
-// Re-export litter for convenience
-pub use litter;
+// Re-export littrs for convenience
+pub use littrs;

@@ -1,8 +1,8 @@
-//! Test rich diagnostic error messages from litter.
+//! Test rich diagnostic error messages from littrs.
 //!
 //! Run with: cargo run --example test_diagnostics
 
-use litter::{PyValue, Sandbox, ToolInfo};
+use littrs::{PyValue, Sandbox, ToolInfo};
 
 fn main() {
     let mut sandbox = Sandbox::new();

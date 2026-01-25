@@ -213,7 +213,7 @@ name = "dragen"
 version = "0.1.0"
 dependencies = [
  "futures",
- "litter",
+ "littrs",
  "regex",
  "serde",
  "serde_json",
@@ -795,16 +795,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "litter"
+name = "littrs"
 version = "0.1.0"
 dependencies = [
- "litter-macros",
+ "littrs-macros",
  "rustpython-parser",
  "thiserror",
 ]
 
 [[package]]
-name = "litter-macros"
+name = "littrs-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",

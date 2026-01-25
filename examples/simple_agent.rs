@@ -7,7 +7,7 @@
 //!   OPENAI_API_KEY=your_key cargo run --example simple_agent -- openai
 
 use dragen::{Agent, AgentConfig};
-use litter::{tool, PyValue};
+use littrs::{tool, PyValue};
 
 /// Add two numbers together.
 ///
