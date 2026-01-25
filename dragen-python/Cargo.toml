@@ -1,0 +1,26 @@
+[package]
+name = "dragen-python"
+version = "0.1.0"
+edition = "2024"
+description = "Python bindings for dragen - CodeAct-style AI agent framework"
+license = "Apache-2.0"
+
+[lib]
+name = "dragen"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core dragen library
+dragen = { path = ".." }
+
+# Python sandbox (for PyValue and ToolInfo)
+littrs = { version = "0.3", features = ["macros"] }
+
+# Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+# Async runtime for blocking on async code
+tokio = { version = "1.48", features = ["rt-multi-thread"] }
+
+# JSON serialization
+serde_json = "1.0"
