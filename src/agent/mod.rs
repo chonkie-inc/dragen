@@ -30,6 +30,8 @@ pub struct Agent {
     config: AgentConfig,
     messages: Vec<Message>,
     code_regex: Regex,
+    /// Regex to match custom thinking tags (e.g., <intent>...</intent>)
+    think_regex: Option<Regex>,
     /// Regex to match <finish>...</finish> blocks (direct structured output)
     finish_regex: Regex,
     /// Holds the final answer when finish() is called (as structured PyValue)
@@ -46,12 +48,18 @@ pub struct Agent {
 
 impl Clone for Agent {
     fn clone(&self) -> Self {
+        // Rebuild thinking regex from config
+        let think_regex = self.config.thinking_tag.as_ref().map(|tag| {
+            Regex::new(&format!(r"<{}>\s*([\s\S]*?)</{}>", tag, tag)).unwrap()
+        });
+
         Self {
             client: self.client.clone(),
             sandbox: self.sandbox.clone(),
             config: self.config.clone(),
             messages: Vec::new(), // Fresh message history
             code_regex: self.code_regex.clone(),
+            think_regex,
             finish_regex: self.finish_regex.clone(),
             finish_answer: Arc::new(Mutex::new(None)), // Fresh finish state
             context: self.context.clone(), // Shared context (intentional)
@@ -65,6 +73,11 @@ impl Clone for Agent {
 impl Agent {
     /// Create a new agent with the given configuration.
     pub fn new(config: AgentConfig) -> Self {
+        // Build thinking tag regex if configured
+        let think_regex = config.thinking_tag.as_ref().map(|tag| {
+            Regex::new(&format!(r"<{}>\s*([\s\S]*?)</{}>", tag, tag)).unwrap()
+        });
+
         Self {
             client: Client::new(),
             sandbox: Sandbox::new(),
@@ -75,6 +88,7 @@ impl Agent {
                 r"(?:<code>\s*([\s\S]*?)</code>|```(?:python|py)?\s*\n([\s\S]*?)```)",
             )
             .unwrap(),
+            think_regex,
             // Match <finish>...</finish> blocks for direct structured output
             finish_regex: Regex::new(r"<finish>\s*([\s\S]*?)</finish>").unwrap(),
             finish_answer: Arc::new(Mutex::new(None)),
@@ -128,6 +142,15 @@ impl Agent {
         F: Fn(&AgentEvent) + Send + Sync + 'static,
     {
         self.callbacks.on_llm_response = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for thinking events (extracted from <think> tags).
+    pub fn on_thinking<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_thinking = Some(Arc::new(f));
         self
     }
 
@@ -418,6 +441,17 @@ impl Agent {
         })
     }
 
+    /// Extract thinking from custom tags (e.g., <intent>...</intent>) in a response.
+    fn extract_thinking(&self, text: &str) -> Option<String> {
+        self.think_regex.as_ref().and_then(|regex| {
+            regex.captures(text).map(|cap| {
+                cap.get(1)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default()
+            })
+        })
+    }
+
     /// Execute code in the sandbox and format the result.
     fn execute_code(&mut self, code: &str) -> String {
         match self.sandbox.execute_with_output(code) {
@@ -519,6 +553,13 @@ impl Agent {
                 content: text.clone(),
                 tokens_used: None,
             });
+
+            // Extract and emit thinking if present
+            if let Some(thinking) = self.extract_thinking(&text) {
+                self.emit(AgentEvent::Thinking {
+                    content: thinking,
+                });
+            }
 
             self.messages.push(Message {
                 role: Role::Assistant,

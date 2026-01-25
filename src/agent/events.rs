@@ -19,6 +19,8 @@ pub enum AgentEvent {
         #[allow(dead_code)]
         tokens_used: Option<usize>,
     },
+    /// Agent is thinking (extracted from <think> tags)
+    Thinking { content: String },
     /// Agent generated code to execute
     CodeGenerated { code: String },
     /// Code was executed in sandbox
@@ -46,6 +48,7 @@ pub struct AgentCallbacks {
     pub on_iteration_start: Option<EventCallback>,
     pub on_llm_request: Option<EventCallback>,
     pub on_llm_response: Option<EventCallback>,
+    pub on_thinking: Option<EventCallback>,
     pub on_code_generated: Option<EventCallback>,
     pub on_code_executed: Option<EventCallback>,
     pub on_tool_call: Option<EventCallback>,
@@ -73,6 +76,7 @@ impl AgentCallbacks {
             AgentEvent::IterationStart { .. } => &self.on_iteration_start,
             AgentEvent::LLMRequest { .. } => &self.on_llm_request,
             AgentEvent::LLMResponse { .. } => &self.on_llm_response,
+            AgentEvent::Thinking { .. } => &self.on_thinking,
             AgentEvent::CodeGenerated { .. } => &self.on_code_generated,
             AgentEvent::CodeExecuted { .. } => &self.on_code_executed,
             AgentEvent::ToolCall { .. } => &self.on_tool_call,

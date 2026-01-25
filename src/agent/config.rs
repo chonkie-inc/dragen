@@ -13,6 +13,8 @@ pub struct AgentConfig {
     pub max_tokens: Option<u32>,
     /// Custom system description (embedded in the full prompt template)
     pub system: Option<String>,
+    /// Custom tag for extracting thinking/intent summaries (e.g., "intent" extracts <intent>...</intent>)
+    pub thinking_tag: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -23,6 +25,7 @@ impl Default for AgentConfig {
             temperature: Some(0.7),
             max_tokens: Some(4096),
             system: None,
+            thinking_tag: None,
         }
     }
 }
@@ -63,6 +66,16 @@ impl AgentConfig {
     /// Set a custom system description (embedded in the full prompt template).
     pub fn system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    /// Set a custom tag for extracting thinking/intent summaries.
+    ///
+    /// When set, the agent will extract content from `<tag>...</tag>` blocks
+    /// and emit Thinking events. For example, `thinking_tag("intent")` will
+    /// extract content from `<intent>...</intent>` blocks.
+    pub fn thinking_tag(mut self, tag: impl Into<String>) -> Self {
+        self.thinking_tag = Some(tag.into());
         self
     }
 }

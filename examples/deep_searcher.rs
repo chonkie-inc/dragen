@@ -143,24 +143,12 @@ EFFICIENCY IS KEY: Each search should yield 5-8 usable sources. If you're doing 
 <workflow>
 Work in focused cycles: THINK → SEARCH → REVIEW → DECIDE
 
-<step name="think">
-BEFORE searching, clearly articulate your reasoning:
-1. What specific aspects of the topic need coverage?
-2. What types of sources would be most valuable? (papers, tutorials, case studies, docs)
-3. What search queries will best target those gaps?
+<step name="intent">
+REQUIRED: Before EVERY search round, call the intent() function:
+intent("What you're searching for and why")
 
-Write your thinking as comments, then execute searches:
-```python
-# THINKING:
-# - Need academic foundations on [specific aspect]
-# - Missing practical implementation examples
-# - Should find industry case studies for real-world context
-#
-# Search strategy:
-# Query 1: Target academic papers with "survey" or "review" terms
-# Query 2: Find practical tutorials and implementation guides
-# Query 3: Look for enterprise/industry adoption stories
-```
+Keep it to one sentence. Example:
+intent("Looking for framework comparisons (LangChain, CrewAI, AutoGPT) to cover implementation options")
 </step>
 
 <step name="search">
@@ -214,6 +202,9 @@ print(f"Decision: {'CONTINUE - need more on X' or 'FINISH - comprehensive covera
 </workflow>
 
 <tools>
+- intent(message: str) → None
+  Declare your search intent before each round. REQUIRED.
+
 - search(query: str, num_results: int) → list[dict]
   Returns: [{title, url, snippet, date, author}, ...]
   Tip: Use 10 results per search for better coverage
@@ -304,40 +295,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system(SYSTEM_PROMPT);
 
     let mut agent = Agent::new(config)
-        // Show thinking/reasoning
         .on_iteration_start(|event| {
             if let AgentEvent::IterationStart { iteration, max_iterations } = event {
                 println!("\n┌─ Iteration {}/{} ─────────────────────────────────────────────",
                     iteration, max_iterations);
-            }
-        })
-        .on_llm_response(|event| {
-            if let AgentEvent::LLMResponse { content, .. } = event {
-                // Extract and display the thinking/reasoning part (non-code text)
-                let lines: Vec<&str> = content.lines().collect();
-                let mut in_code_block = false;
-                let mut thinking_lines: Vec<&str> = Vec::new();
-
-                for line in lines {
-                    if line.trim().starts_with("```") {
-                        in_code_block = !in_code_block;
-                        continue;
-                    }
-                    if !in_code_block && !line.trim().is_empty() {
-                        thinking_lines.push(line);
-                    }
-                }
-
-                if !thinking_lines.is_empty() {
-                    println!("│");
-                    println!("│ 💭 Thinking:");
-                    for line in thinking_lines.iter().take(15) {
-                        println!("│    {}", line);
-                    }
-                    if thinking_lines.len() > 15 {
-                        println!("│    ... ({} more lines)", thinking_lines.len() - 15);
-                    }
-                }
             }
         })
         .on_code_generated(|event| {
@@ -385,6 +346,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string();
         let num_results = args.get(1).and_then(|v| v.as_int()).unwrap_or(8);
         search_web(query, num_results, search_count_clone.clone())
+    });
+
+    // Register the intent tool for declaring search intentions
+    let intent_info = ToolInfo::new("intent", "Declare your intent before searching")
+        .arg_required("message", "str", "Brief description of what you're searching for and why")
+        .returns("None");
+
+    agent.register_tool(intent_info, |args| {
+        let message = args
+            .get(0)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("│");
+        println!("│ 💭 {}", message);
+        PyValue::None
     });
 
     // Get topic from command line or use default
