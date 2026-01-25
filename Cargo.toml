@@ -10,7 +10,7 @@ license = "Apache-2.0"
 tanukie = { path = "../tanukie" }
 
 # Python sandbox
-littrs = { version = "0.3", features = ["macros"] }
+littrs = { path = "../litter/crates/littrs", features = ["macros"] }
 
 # Async runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }

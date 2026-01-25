@@ -44,6 +44,24 @@ pub struct Agent {
     callbacks: AgentCallbacks,
 }
 
+impl Clone for Agent {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            sandbox: self.sandbox.clone(),
+            config: self.config.clone(),
+            messages: Vec::new(), // Fresh message history
+            code_regex: self.code_regex.clone(),
+            finish_regex: self.finish_regex.clone(),
+            finish_answer: Arc::new(Mutex::new(None)), // Fresh finish state
+            context: self.context.clone(), // Shared context (intentional)
+            context_reads: self.context_reads.clone(),
+            context_write: self.context_write.clone(),
+            callbacks: self.callbacks.clone(),
+        }
+    }
+}
+
 impl Agent {
     /// Create a new agent with the given configuration.
     pub fn new(config: AgentConfig) -> Self {
@@ -605,6 +623,47 @@ impl Agent {
                 return Ok(result);
             }
         }
+    }
+
+    /// Run multiple tasks in parallel using cloned agents.
+    ///
+    /// Each task is run on a fresh clone of this agent, allowing parallel execution.
+    /// Results are returned in the same order as the input tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - A list of task strings to run
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let agent = Agent::new(config);
+    /// agent.register(search_tool::Tool);
+    ///
+    /// let results: Vec<String> = agent.map(vec![
+    ///     "Write about topic A".to_string(),
+    ///     "Write about topic B".to_string(),
+    ///     "Write about topic C".to_string(),
+    /// ]).await?;
+    /// ```
+    pub async fn map<T>(&self, tasks: Vec<String>) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned + Serialize + Send + 'static,
+    {
+        use futures::future::join_all;
+
+        let futures: Vec<_> = tasks
+            .into_iter()
+            .map(|task| {
+                let mut agent = self.clone();
+                async move { agent.run::<T>(&task).await }
+            })
+            .collect();
+
+        let results = join_all(futures).await;
+
+        // Collect results, propagating first error if any
+        results.into_iter().collect()
     }
 }
 

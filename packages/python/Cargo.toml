@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 dragen = { path = "../.." }
 
 # Python sandbox (for PyValue and ToolInfo)
-littrs = { version = "0.3", features = ["macros"] }
+littrs = { path = "../../../litter/crates/littrs", features = ["macros"] }
 
 # Python bindings
 pyo3 = { version = "0.23", features = ["extension-module"] }

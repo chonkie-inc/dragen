@@ -816,8 +816,6 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "littrs"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "618090a0190e499460af9c05f09a0845d06254a191e3c47733a738c82f799e24"
 dependencies = [
  "littrs-macros",
  "rustpython-parser",
@@ -827,8 +825,6 @@ dependencies = [
 [[package]]
 name = "littrs-macros"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afa5c92b6ba38f7d54e3b1ba2b4a584cc4218ba01bfb29b48988ff8d9adaa3f7"
 dependencies = [
  "proc-macro2",
  "quote",

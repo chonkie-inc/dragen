@@ -803,6 +803,45 @@ def make_decorator(agent, name):
     ) -> PyResult<()> {
         register_tool_from_function(self, py, func, name)
     }
+
+    /// Run multiple tasks in parallel, each with a fresh agent clone.
+    ///
+    /// Creates independent agent instances with the same configuration and tools,
+    /// runs each task in parallel, and returns results in order.
+    ///
+    /// Args:
+    ///     tasks: List of task strings to run
+    ///
+    /// Returns:
+    ///     List of results in the same order as input tasks
+    ///
+    /// Example:
+    ///     >>> agent = Agent("gpt-4o")
+    ///     >>> @agent.tool
+    ///     ... def search(query: str) -> list:
+    ///     ...     return [{"result": query}]
+    ///     >>>
+    ///     >>> results = agent.map([
+    ///     ...     "Write about topic A",
+    ///     ...     "Write about topic B",
+    ///     ...     "Write about topic C",
+    ///     ... ])
+    fn map(&mut self, py: Python<'_>, tasks: Vec<String>) -> PyResult<PyObject> {
+        // Use Rust-side parallel execution
+        let result = py.allow_threads(|| {
+            self.runtime.block_on(async {
+                self.inner.map::<serde_json::Value>(tasks).await
+            })
+        });
+
+        match result {
+            Ok(values) => {
+                let py_results: Vec<PyObject> = values.iter().map(|v| json_to_py(py, v)).collect();
+                Ok(py_results.into_py(py))
+            }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Parallel execution failed: {}", e))),
+        }
+    }
 }
 
 // ============================================================================
