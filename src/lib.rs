@@ -54,7 +54,7 @@ mod agent;
 mod context;
 mod error;
 
-pub use agent::{pyvalue_to_json, Agent, AgentConfig};
+pub use agent::{pyvalue_to_json, Agent, AgentCallbacks, AgentConfig, AgentEvent};
 pub use context::Context;
 pub use error::{Error, Result};
 

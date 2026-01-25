@@ -42,12 +42,12 @@ jobs:
 
       - name: Build wheel
         run: |
-          cd dragen-python
+          cd packages/python
           maturin build --release
 
       - name: Test import
         run: |
-          pip install dragen-python/target/wheels/*.whl
+          pip install packages/python/target/wheels/*.whl
           python -c "from dragen import Agent, Context, ToolInfo; print('Import OK')"
 
   clippy:

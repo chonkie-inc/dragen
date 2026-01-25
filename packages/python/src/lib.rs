@@ -4,7 +4,7 @@
 //! LLM-powered code execution with tool registration.
 
 use ::dragen::{
-    Agent as RustAgent, AgentConfig as RustAgentConfig, Context as RustContext,
+    Agent as RustAgent, AgentConfig as RustAgentConfig, AgentEvent, Context as RustContext,
 };
 use ::littrs::{PyValue, ToolInfo as RustToolInfo};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -347,6 +347,21 @@ impl Context {
 ///     >>> agent.register_function("search", search)
 ///     >>> result = agent.run("Search for Python tutorials")
 ///
+/// Helper to get event type string from AgentEvent
+fn event_type_for_event(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::IterationStart { .. } => "iteration_start",
+        AgentEvent::LLMRequest { .. } => "llm_request",
+        AgentEvent::LLMResponse { .. } => "llm_response",
+        AgentEvent::CodeGenerated { .. } => "code_generated",
+        AgentEvent::CodeExecuted { .. } => "code_executed",
+        AgentEvent::ToolCall { .. } => "tool_call",
+        AgentEvent::ToolResult { .. } => "tool_result",
+        AgentEvent::Finish { .. } => "finish",
+        AgentEvent::Error { .. } => "error",
+    }
+}
+
 /// Note: Agent is not thread-safe and must be used from a single thread.
 #[pyclass(unsendable)]
 struct Agent {
@@ -368,13 +383,14 @@ impl Agent {
     ///     max_tokens: Maximum tokens for LLM response (default: 4096, None for unlimited)
     ///     system: Custom system description
     #[new]
-    #[pyo3(signature = (model, max_iterations=None, temperature=None, max_tokens=None, system=None))]
+    #[pyo3(signature = (model, max_iterations=None, temperature=None, max_tokens=None, system=None, verbose=None))]
     fn new(
         model: &str,
         max_iterations: Option<usize>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         system: Option<&str>,
+        verbose: Option<bool>,
     ) -> PyResult<Self> {
         let runtime = Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
@@ -393,13 +409,142 @@ impl Agent {
             config = config.system(s);
         }
 
+        let mut agent = RustAgent::new(config);
+        if verbose.unwrap_or(false) {
+            agent = agent.verbose(true);
+        }
+
         Ok(Self {
-            inner: RustAgent::new(config),
+            inner: agent,
             runtime,
             context: None,
             context_reads: Vec::new(),
             context_write: None,
         })
+    }
+
+    /// Register a callback for agent events.
+    ///
+    /// Use as a decorator to handle specific events during agent execution.
+    /// Callbacks fire in real-time as events occur during run().
+    ///
+    /// Event types: iteration_start, llm_request, llm_response, code_generated,
+    ///              code_executed, tool_call, tool_result, finish, error
+    ///
+    /// Example:
+    ///     >>> agent = Agent("opus")
+    ///     >>>
+    ///     >>> @agent.on("tool_call")
+    ///     ... def log_tool(event):
+    ///     ...     print(f"Tool: {event['name']}({event['args']})")
+    ///     >>>
+    ///     >>> @agent.on("code_executed")
+    ///     ... def log_code(event):
+    ///     ...     print(f"Code: {event['code'][:50]}...")
+    ///     >>>
+    ///     >>> result = agent.run("Search for Python tutorials")
+    #[pyo3(signature = (event_type))]
+    fn on(
+        mut slf: PyRefMut<'_, Self>,
+        py: Python<'_>,
+        event_type: String,
+    ) -> PyResult<PyObject> {
+        let event_type_clone = event_type.clone();
+
+        // Return a decorator function
+        let decorator = PyModule::from_code(
+            py,
+            c"
+def make_decorator(agent, event_type):
+    def decorator(func):
+        agent._register_callback(event_type, func)
+        return func
+    return decorator
+",
+            c"_dragen_on_decorator",
+            c"_dragen_on_decorator",
+        )?;
+
+        let make_decorator = decorator.getattr("make_decorator")?;
+        let result = make_decorator.call1((slf.into_pyobject(py)?, event_type_clone))?;
+        Ok(result.into_py(py))
+    }
+
+    /// Internal method to register a callback (called by decorator).
+    /// This registers a Rust callback that calls Python via with_gil().
+    #[pyo3(name = "_register_callback")]
+    fn register_callback(
+        &mut self,
+        py: Python<'_>,
+        event_type: String,
+        func: PyObject,
+    ) {
+        let func = func.clone_ref(py);
+
+        // Create a Rust callback that calls Python via with_gil
+        let rust_callback = move |event: &AgentEvent| {
+            Python::with_gil(|py| {
+                // Build event dict
+                let dict = PyDict::new(py);
+                let _ = dict.set_item("type", event_type_for_event(event));
+
+                match event {
+                    AgentEvent::IterationStart { iteration, max_iterations } => {
+                        let _ = dict.set_item("iteration", *iteration);
+                        let _ = dict.set_item("max_iterations", *max_iterations);
+                    }
+                    AgentEvent::LLMRequest { message_count } => {
+                        let _ = dict.set_item("message_count", *message_count);
+                    }
+                    AgentEvent::LLMResponse { content, tokens_used } => {
+                        let _ = dict.set_item("content", content.clone());
+                        let _ = dict.set_item("tokens_used", *tokens_used);
+                    }
+                    AgentEvent::CodeGenerated { code } => {
+                        let _ = dict.set_item("code", code.clone());
+                    }
+                    AgentEvent::CodeExecuted { code, output, success } => {
+                        let _ = dict.set_item("code", code.clone());
+                        let _ = dict.set_item("output", output.clone());
+                        let _ = dict.set_item("success", *success);
+                    }
+                    AgentEvent::ToolCall { name, args } => {
+                        let _ = dict.set_item("name", name.clone());
+                        let py_args: Vec<PyObject> = args.iter().map(|v| pyvalue_to_py(py, v)).collect();
+                        let _ = dict.set_item("args", py_args);
+                    }
+                    AgentEvent::ToolResult { name, result } => {
+                        let _ = dict.set_item("name", name.clone());
+                        let _ = dict.set_item("result", pyvalue_to_py(py, result));
+                    }
+                    AgentEvent::Finish { value } => {
+                        let _ = dict.set_item("value", pyvalue_to_py(py, value));
+                    }
+                    AgentEvent::Error { message } => {
+                        let _ = dict.set_item("message", message.clone());
+                    }
+                }
+
+                // Call the Python callback, ignoring errors
+                let _ = func.call1(py, (dict,));
+            });
+        };
+
+        // Register the Rust callback with the appropriate event type
+        // We need to swap out the inner agent since the builder methods consume self
+        let inner = std::mem::replace(&mut self.inner, RustAgent::with_model("temp"));
+        self.inner = match event_type.as_str() {
+            "iteration_start" => inner.on_iteration_start(rust_callback),
+            "llm_request" => inner.on_llm_request(rust_callback),
+            "llm_response" => inner.on_llm_response(rust_callback),
+            "code_generated" => inner.on_code_generated(rust_callback),
+            "code_executed" => inner.on_code_executed(rust_callback),
+            "tool_call" => inner.on_tool_call(rust_callback),
+            "tool_result" => inner.on_tool_result(rust_callback),
+            "finish" => inner.on_finish(rust_callback),
+            "error" => inner.on_error(rust_callback),
+            _ => inner.on_event(rust_callback), // Unknown event type -> catch-all
+        };
     }
 
     /// Register a Python callable as a tool in the agent's sandbox.
@@ -521,6 +666,7 @@ impl Agent {
     /// Run the agent on a task.
     ///
     /// This method blocks until the agent completes or reaches max iterations.
+    /// Callbacks registered via @agent.on() fire in real-time during execution.
     ///
     /// Args:
     ///     task: The task description for the agent
@@ -533,6 +679,8 @@ impl Agent {
     ///     ValueError: If the result cannot be deserialized
     fn run(&mut self, py: Python<'_>, task: &str) -> PyResult<PyObject> {
         // Release GIL while running async code
+        // Callbacks registered via @agent.on() use Python::with_gil() to re-acquire
+        // the GIL and call Python functions during execution
         let result = py.allow_threads(|| {
             self.runtime.block_on(async {
                 self.inner.run::<serde_json::Value>(task).await
@@ -587,6 +735,222 @@ impl Agent {
     fn describe_tools(&self) -> String {
         self.inner.sandbox().describe_tools()
     }
+
+    /// Decorator to register a function as a tool.
+    ///
+    /// Automatically extracts tool info from type hints and docstring.
+    ///
+    /// Example:
+    ///     >>> @agent.tool
+    ///     ... def search(query: str, limit: int = 5) -> list:
+    ///     ...     """Search the web for information."""
+    ///     ...     return [{"result": query}]
+    ///
+    /// Or with explicit name:
+    ///     >>> @agent.tool(name="web_search")
+    ///     ... def search(query: str) -> list:
+    ///     ...     """Search the web."""
+    ///     ...     return []
+    #[pyo3(signature = (func=None, *, name=None))]
+    fn tool(
+        mut slf: PyRefMut<'_, Self>,
+        py: Python<'_>,
+        func: Option<PyObject>,
+        name: Option<String>,
+    ) -> PyResult<PyObject> {
+        // If func is provided, we're being called as @agent.tool (no parens)
+        // If func is None, we're being called as @agent.tool() or @agent.tool(name="...")
+        match func {
+            Some(f) => {
+                // Direct decoration: @agent.tool
+                register_tool_from_function(&mut slf, py, f.clone_ref(py), name)?;
+                Ok(f)
+            }
+            None => {
+                // Parameterized decoration: @agent.tool() or @agent.tool(name="...")
+                // Return a decorator function
+                let name_clone = name.clone();
+
+                // We need to create a Python function that will be called with the actual function
+                // Use a closure captured in a Python lambda
+                let decorator = PyModule::from_code(
+                    py,
+                    c"
+def make_decorator(agent, name):
+    def decorator(func):
+        agent._register_tool_from_func(func, name)
+        return func
+    return decorator
+",
+                    c"_dragen_decorator",
+                    c"_dragen_decorator",
+                )?;
+
+                let make_decorator = decorator.getattr("make_decorator")?;
+                let result = make_decorator.call1((slf.into_pyobject(py)?, name_clone))?;
+                Ok(result.into_py(py))
+            }
+        }
+    }
+
+    /// Internal method to register a tool from a function (called by decorator).
+    #[pyo3(name = "_register_tool_from_func", signature = (func, name=None))]
+    fn register_tool_from_func(
+        &mut self,
+        py: Python<'_>,
+        func: PyObject,
+        name: Option<String>,
+    ) -> PyResult<()> {
+        register_tool_from_function(self, py, func, name)
+    }
+}
+
+// ============================================================================
+// Tool registration helper
+// ============================================================================
+
+/// Register a tool by introspecting a Python function's signature and docstring.
+fn register_tool_from_function(
+    agent: &mut Agent,
+    py: Python<'_>,
+    func: PyObject,
+    override_name: Option<String>,
+) -> PyResult<()> {
+    let func_bound = func.bind(py);
+
+    if !func_bound.is_callable() {
+        return Err(PyTypeError::new_err("func must be callable"));
+    }
+
+    // Get function name
+    let func_name: String = match override_name {
+        Some(n) => n,
+        None => func_bound
+            .getattr("__name__")
+            .map(|n| n.extract::<String>().unwrap_or_else(|_| "tool".to_string()))
+            .unwrap_or_else(|_| "tool".to_string()),
+    };
+
+    // Get docstring for description
+    let description: String = func_bound
+        .getattr("__doc__")
+        .ok()
+        .and_then(|doc| {
+            if doc.is_none() {
+                None
+            } else {
+                doc.extract::<String>().ok()
+            }
+        })
+        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+        .unwrap_or_else(|| format!("{} tool", func_name));
+
+    // Use inspect module to get signature
+    let inspect = py.import("inspect")?;
+    let signature = inspect.call_method1("signature", (&func,))?;
+    let parameters = signature.getattr("parameters")?;
+
+    // Build ToolInfo
+    let mut tool_info = RustToolInfo::new(&func_name, &description);
+
+    // Track parameter names for wrapper
+    let mut param_names: Vec<String> = Vec::new();
+    let mut param_defaults: Vec<Option<PyObject>> = Vec::new();
+
+    // Iterate over parameters
+    let items = parameters.call_method0("items")?;
+    for item in items.iter()? {
+        let item = item?;
+        let tuple = item.downcast::<pyo3::types::PyTuple>()?;
+        let param_name: String = tuple.get_item(0)?.extract()?;
+        let param = tuple.get_item(1)?;
+
+        // Skip *args and **kwargs
+        let kind: i32 = param.getattr("kind")?.extract()?;
+        if kind == 2 || kind == 4 {
+            // VAR_POSITIONAL or VAR_KEYWORD
+            continue;
+        }
+
+        param_names.push(param_name.clone());
+
+        // Get type annotation
+        let annotation = param.getattr("annotation")?;
+        let inspect_empty = inspect.getattr("Parameter")?.getattr("empty")?;
+        let type_str = if annotation.is(&inspect_empty) {
+            "any".to_string()
+        } else {
+            // Try to get __name__ or use str()
+            annotation
+                .getattr("__name__")
+                .map(|n| n.extract::<String>().unwrap_or_else(|_| "any".to_string()))
+                .unwrap_or_else(|_| {
+                    annotation
+                        .str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "any".to_string())
+                })
+        };
+
+        // Check if has default
+        let default = param.getattr("default")?;
+        let has_default = !default.is(&inspect_empty);
+
+        if has_default {
+            tool_info = tool_info.arg_optional(&param_name, &type_str, "");
+            param_defaults.push(Some(default.into_py(py)));
+        } else {
+            tool_info = tool_info.arg_required(&param_name, &type_str, "");
+            param_defaults.push(None);
+        }
+    }
+
+    // Get return type
+    let return_annotation = signature.getattr("return_annotation")?;
+    let inspect_empty = inspect.getattr("Signature")?.getattr("empty")?;
+    if !return_annotation.is(&inspect_empty) {
+        let return_type = return_annotation
+            .getattr("__name__")
+            .map(|n| n.extract::<String>().unwrap_or_else(|_| "any".to_string()))
+            .unwrap_or_else(|_| "any".to_string());
+        tool_info = tool_info.returns(&return_type);
+    }
+
+    // Create wrapper that converts positional args to kwargs
+    let func_clone = func.clone_ref(py);
+    let param_names_clone = param_names.clone();
+    let param_defaults_clone: Vec<Option<serde_json::Value>> = param_defaults
+        .iter()
+        .map(|d| d.as_ref().and_then(|obj| py_to_json(obj.bind(py)).ok()))
+        .collect();
+
+    agent.inner.register_tool(tool_info, move |args: Vec<PyValue>| {
+        Python::with_gil(|py| {
+            // Build kwargs dict
+            let kwargs = PyDict::new(py);
+
+            for (i, name) in param_names_clone.iter().enumerate() {
+                if i < args.len() {
+                    // Use provided argument
+                    kwargs.set_item(name, pyvalue_to_py(py, &args[i])).unwrap();
+                } else if let Some(Some(default)) = param_defaults_clone.get(i) {
+                    // Use default value
+                    kwargs.set_item(name, json_to_py(py, default)).unwrap();
+                }
+            }
+
+            // Call with kwargs
+            match func_clone.call(py, (), Some(&kwargs)) {
+                Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
+                Err(e) => PyValue::Dict(vec![(
+                    "error".to_string(),
+                    PyValue::Str(format!("{}", e)),
+                )]),
+            }
+        })
+    });
+
+    Ok(())
 }
 
 // ============================================================================

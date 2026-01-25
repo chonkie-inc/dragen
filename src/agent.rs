@@ -11,6 +11,165 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::sync::{Arc, Mutex};
 use tanukie::{Client, Message, Role};
 
+// ============================================================================
+// Agent Events & Callbacks
+// ============================================================================
+
+/// Events emitted during agent execution for observability.
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    /// Starting a new iteration
+    IterationStart {
+        iteration: usize,
+        max_iterations: usize,
+    },
+    /// About to call the LLM
+    LLMRequest {
+        message_count: usize,
+    },
+    /// LLM responded
+    LLMResponse {
+        content: String,
+        #[allow(dead_code)]
+        tokens_used: Option<usize>,
+    },
+    /// Agent generated code to execute
+    CodeGenerated {
+        code: String,
+    },
+    /// Code was executed in sandbox
+    CodeExecuted {
+        code: String,
+        output: String,
+        success: bool,
+    },
+    /// A tool was called
+    ToolCall {
+        name: String,
+        args: Vec<PyValue>,
+    },
+    /// A tool returned a result
+    ToolResult {
+        name: String,
+        result: PyValue,
+    },
+    /// Agent called finish()
+    Finish {
+        value: PyValue,
+    },
+    /// An error occurred
+    Error {
+        message: String,
+    },
+}
+
+/// Type alias for event callbacks
+pub type EventCallback = Arc<dyn Fn(&AgentEvent) + Send + Sync>;
+
+/// Storage for agent callbacks
+#[derive(Default, Clone)]
+pub struct AgentCallbacks {
+    pub on_iteration_start: Option<EventCallback>,
+    pub on_llm_request: Option<EventCallback>,
+    pub on_llm_response: Option<EventCallback>,
+    pub on_code_generated: Option<EventCallback>,
+    pub on_code_executed: Option<EventCallback>,
+    pub on_tool_call: Option<EventCallback>,
+    pub on_tool_result: Option<EventCallback>,
+    pub on_finish: Option<EventCallback>,
+    pub on_error: Option<EventCallback>,
+    /// Catch-all callback for any event
+    pub on_event: Option<EventCallback>,
+    /// Captured events (used internally by Python bindings)
+    captured_events: Option<Arc<Mutex<Vec<AgentEvent>>>>,
+}
+
+impl AgentCallbacks {
+    /// Emit an event to the appropriate callback(s)
+    fn emit(&self, event: &AgentEvent) {
+        // Capture event if enabled (used by Python bindings)
+        if let Some(ref events) = self.captured_events {
+            if let Ok(mut events) = events.lock() {
+                events.push(event.clone());
+            }
+        }
+
+        // Call specific callback
+        let specific = match event {
+            AgentEvent::IterationStart { .. } => &self.on_iteration_start,
+            AgentEvent::LLMRequest { .. } => &self.on_llm_request,
+            AgentEvent::LLMResponse { .. } => &self.on_llm_response,
+            AgentEvent::CodeGenerated { .. } => &self.on_code_generated,
+            AgentEvent::CodeExecuted { .. } => &self.on_code_executed,
+            AgentEvent::ToolCall { .. } => &self.on_tool_call,
+            AgentEvent::ToolResult { .. } => &self.on_tool_result,
+            AgentEvent::Finish { .. } => &self.on_finish,
+            AgentEvent::Error { .. } => &self.on_error,
+        };
+
+        if let Some(cb) = specific {
+            cb(event);
+        }
+
+        // Call catch-all callback
+        if let Some(cb) = &self.on_event {
+            cb(event);
+        }
+    }
+}
+
+/// Create verbose logging callbacks
+fn verbose_callbacks() -> AgentCallbacks {
+    AgentCallbacks {
+        on_iteration_start: Some(Arc::new(|e| {
+            if let AgentEvent::IterationStart { iteration, max_iterations } = e {
+                eprintln!("[dragen] Iteration {}/{}", iteration, max_iterations);
+            }
+        })),
+        on_llm_response: Some(Arc::new(|e| {
+            if let AgentEvent::LLMResponse { content, .. } = e {
+                let preview: String = content.chars().take(100).collect();
+                let suffix = if content.len() > 100 { "..." } else { "" };
+                eprintln!("[dragen] LLM: {}{}", preview.replace('\n', "\\n"), suffix);
+            }
+        })),
+        on_code_generated: Some(Arc::new(|e| {
+            if let AgentEvent::CodeGenerated { code } = e {
+                let lines: Vec<&str> = code.lines().take(3).collect();
+                let preview = lines.join("\\n");
+                let suffix = if code.lines().count() > 3 { "..." } else { "" };
+                eprintln!("[dragen] Code: {}{}", preview, suffix);
+            }
+        })),
+        on_code_executed: Some(Arc::new(|e| {
+            if let AgentEvent::CodeExecuted { output, success, .. } = e {
+                let status = if *success { "✓" } else { "✗" };
+                let preview: String = output.chars().take(80).collect();
+                let suffix = if output.len() > 80 { "..." } else { "" };
+                eprintln!("[dragen] {} {}{}", status, preview.replace('\n', "\\n"), suffix);
+            }
+        })),
+        on_tool_call: Some(Arc::new(|e| {
+            if let AgentEvent::ToolCall { name, args } = e {
+                let args_preview: Vec<String> = args.iter().take(3).map(|a| format!("{:?}", a)).collect();
+                let suffix = if args.len() > 3 { ", ..." } else { "" };
+                eprintln!("[dragen] Tool: {}({}{})", name, args_preview.join(", "), suffix);
+            }
+        })),
+        on_finish: Some(Arc::new(|e| {
+            if let AgentEvent::Finish { value } = e {
+                eprintln!("[dragen] Finish: {:?}", value);
+            }
+        })),
+        on_error: Some(Arc::new(|e| {
+            if let AgentEvent::Error { message } = e {
+                eprintln!("[dragen] Error: {}", message);
+            }
+        })),
+        ..Default::default()
+    }
+}
+
 /// Marker prefix for finish tool output
 const FINISH_MARKER: &str = "___FINISH___:";
 
@@ -132,6 +291,8 @@ pub struct Agent {
     context_reads: Vec<String>,
     /// Key to write output to in context
     context_write: Option<String>,
+    /// Callbacks for observability
+    callbacks: AgentCallbacks,
 }
 
 impl Agent {
@@ -150,7 +311,154 @@ impl Agent {
             context: None,
             context_reads: Vec::new(),
             context_write: None,
+            callbacks: AgentCallbacks::default(),
         }
+    }
+
+    /// Enable verbose logging to stderr.
+    ///
+    /// This prints iteration progress, LLM responses, code execution, and tool calls.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let agent = Agent::new(config).verbose(true);
+    /// ```
+    pub fn verbose(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.callbacks = verbose_callbacks();
+        }
+        self
+    }
+
+    /// Set a callback for iteration start events.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let agent = Agent::new(config)
+    ///     .on_iteration_start(|e| {
+    ///         if let AgentEvent::IterationStart { iteration, max_iterations } = e {
+    ///             println!("[{}/{}]", iteration, max_iterations);
+    ///         }
+    ///     });
+    /// ```
+    pub fn on_iteration_start<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_iteration_start = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for LLM request events.
+    pub fn on_llm_request<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_llm_request = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for LLM response events.
+    pub fn on_llm_response<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_llm_response = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for code generation events.
+    pub fn on_code_generated<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_code_generated = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for code execution events.
+    pub fn on_code_executed<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_code_executed = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for tool call events.
+    pub fn on_tool_call<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_tool_call = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for tool result events.
+    pub fn on_tool_result<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_tool_result = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for finish events.
+    pub fn on_finish<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_finish = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback for error events.
+    pub fn on_error<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_error = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a catch-all callback for any event.
+    ///
+    /// This is called for every event in addition to specific callbacks.
+    pub fn on_event<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&AgentEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.on_event = Some(Arc::new(f));
+        self
+    }
+
+    /// Emit an event to registered callbacks.
+    fn emit(&self, event: AgentEvent) {
+        self.callbacks.emit(&event);
+    }
+
+    /// Enable event capture (used internally by Python bindings).
+    #[doc(hidden)]
+    pub fn capture_events(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.callbacks.captured_events = Some(Arc::new(Mutex::new(Vec::new())));
+        } else {
+            self.callbacks.captured_events = None;
+        }
+        self
+    }
+
+    /// Take captured events (used internally by Python bindings).
+    #[doc(hidden)]
+    pub fn take_events(&mut self) -> Vec<AgentEvent> {
+        if let Some(ref events) = self.callbacks.captured_events {
+            if let Ok(mut events) = events.lock() {
+                return std::mem::take(&mut *events);
+            }
+        }
+        Vec::new()
     }
 
     /// Register the default finish tool if no custom one exists.
@@ -452,13 +760,35 @@ impl Agent {
         let mut iterations = 0;
 
         loop {
-            if iterations >= self.config.max_iterations {
+            iterations += 1;
+
+            if iterations > self.config.max_iterations {
+                self.emit(AgentEvent::Error {
+                    message: format!("Max iterations ({}) reached", self.config.max_iterations),
+                });
                 return Err(Error::MaxIterations(self.config.max_iterations));
             }
+
+            // Emit iteration start
+            self.emit(AgentEvent::IterationStart {
+                iteration: iterations,
+                max_iterations: self.config.max_iterations,
+            });
+
+            // Emit LLM request
+            self.emit(AgentEvent::LLMRequest {
+                message_count: self.messages.len(),
+            });
 
             // Call LLM
             let response = self.call_llm().await?;
             let text = response.text.clone();
+
+            // Emit LLM response
+            self.emit(AgentEvent::LLMResponse {
+                content: text.clone(),
+                tokens_used: None, // TODO: get from response if available
+            });
 
             // Add assistant response to history
             self.messages.push(Message {
@@ -474,12 +804,21 @@ impl Agent {
                 // Try to parse the content as JSON
                 match serde_json::from_str::<T>(&finish_content) {
                     Ok(result) => {
+                        // Emit finish event
+                        if let Ok(json) = serde_json::to_value(&result) {
+                            self.emit(AgentEvent::Finish {
+                                value: json_to_pyvalue(&json),
+                            });
+                        }
                         self.save_to_context(&result);
                         return Ok(result);
                     }
                     Err(e) => {
+                        self.emit(AgentEvent::Error {
+                            message: format!("Invalid JSON in <finish> block: {}", e),
+                        });
+
                         // Give the LLM feedback with the exact error and its output
-                        iterations += 1;
                         if iterations >= self.config.max_iterations {
                             return Err(Error::Deserialization(format!(
                                 "Invalid JSON in <finish> block: {}", e
@@ -502,16 +841,32 @@ impl Agent {
 
             // Check for code block
             if let Some(code) = self.extract_code(&text) {
-                iterations += 1;
+                // Emit code generated
+                self.emit(AgentEvent::CodeGenerated {
+                    code: code.clone(),
+                });
 
                 // Execute the code
                 let output = self.execute_code(&code);
+                let success = !output.starts_with("Error:");
+
+                // Emit code executed
+                self.emit(AgentEvent::CodeExecuted {
+                    code: code.clone(),
+                    output: output.clone(),
+                    success,
+                });
 
                 // Check if finish() was called
                 if output.contains(FINISH_MARKER) {
                     // Get the answer from the mutex and deserialize
                     if let Ok(fa) = self.finish_answer.lock() {
                         if let Some(value) = fa.as_ref() {
+                            // Emit finish event
+                            self.emit(AgentEvent::Finish {
+                                value: value.clone(),
+                            });
+
                             let json = pyvalue_to_json(value);
                             match serde_json::from_value::<T>(json.clone()) {
                                 Ok(result) => {
@@ -690,6 +1045,34 @@ pub fn pyvalue_to_json(value: &PyValue) -> serde_json::Value {
                 .map(|(k, v)| (k.clone(), pyvalue_to_json(v)))
                 .collect();
             serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// Convert a serde_json::Value to a PyValue.
+fn json_to_pyvalue(value: &serde_json::Value) -> PyValue {
+    match value {
+        serde_json::Value::Null => PyValue::None,
+        serde_json::Value::Bool(b) => PyValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                PyValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                PyValue::Float(f)
+            } else {
+                PyValue::None
+            }
+        }
+        serde_json::Value::String(s) => PyValue::Str(s.clone()),
+        serde_json::Value::Array(arr) => {
+            PyValue::List(arr.iter().map(json_to_pyvalue).collect())
+        }
+        serde_json::Value::Object(map) => {
+            PyValue::Dict(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), json_to_pyvalue(v)))
+                    .collect(),
+            )
         }
     }
 }

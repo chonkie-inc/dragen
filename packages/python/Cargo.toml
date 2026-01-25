@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Core dragen library
-dragen = { path = ".." }
+dragen = { path = "../.." }
 
 # Python sandbox (for PyValue and ToolInfo)
 littrs = { version = "0.3", features = ["macros"] }

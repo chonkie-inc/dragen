@@ -32,14 +32,14 @@ jobs:
 
       - name: Build wheels
         run: |
-          cd dragen-python
+          cd packages/python
           maturin build --release --out dist
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: dragen-python/dist
+          path: packages/python/dist
 
   # Upload all wheels to PyPI
   upload-pypi:
