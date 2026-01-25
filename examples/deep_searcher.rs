@@ -221,7 +221,28 @@ finish({
 - Be adaptive: simple topics need fewer sources, complex topics need thorough coverage
 - Show your reasoning: explain what you're searching for and why
 - Track gaps: note what aspects still need coverage after each round
-</rules>"#;
+</rules>
+
+<constraints>
+IMPORTANT: The Python sandbox has limited features. You MUST NOT use:
+- def (no function definitions) - use inline code instead
+- try/except (no exception handling) - assume operations succeed
+- globals() (not available) - just use variables directly
+- {k: v for ...} (no dict comprehensions) - use explicit loops or list comprehensions
+- import (no imports available)
+- class (no class definitions)
+
+SUPPORTED features:
+- Variables, lists, dicts, strings, ints, floats, bools
+- for loops, while loops, if/elif/else
+- List comprehensions: [x for x in items if condition]
+- f-strings: f"text {variable}"
+- Tuple unpacking: for i, item in enumerate(items)
+- List methods: append, extend, pop, clear, insert, remove
+- String methods: lower, upper, strip, split, join, replace, startswith, endswith
+- Dict methods: get, keys, values, items
+- Builtins: len, str, int, float, bool, list, range, abs, min, max, sum, print, enumerate, zip, sorted, reversed, any, all
+</constraints>"#;
 
 /// Output structure for collected sources
 #[derive(Debug, Serialize, Deserialize)]
