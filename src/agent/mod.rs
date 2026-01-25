@@ -255,6 +255,20 @@ impl Agent {
         self.sandbox.register_tool(info, f);
     }
 
+    /// Set a variable in the agent's sandbox.
+    ///
+    /// This allows you to inject initial state that the agent's code can access.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// agent.set_variable("collected_items", PyValue::List(vec![]));
+    /// // Now the agent's Python code can use `collected_items`
+    /// ```
+    pub fn set_variable(&mut self, name: impl Into<String>, value: impl Into<PyValue>) {
+        self.sandbox.set_variable(name, value);
+    }
+
     /// Register a custom finish tool with specified arguments.
     pub fn register_finish<F>(&mut self, info: ToolInfo, f: F)
     where
