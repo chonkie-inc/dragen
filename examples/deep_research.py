@@ -5,9 +5,9 @@ Deep Research - Complete research pipeline with source collection.
 Combines deep searcher (source collection) with research pipeline (planning + writing):
 
 1. Search Agent (gemini-3-flash-preview) - Collects high-quality sources
-2. Planner Agent (claude-opus-4-5-20251101) - Creates outline with source assignments
+2. Planner Agent (gemini-3-flash-preview) - Creates outline with source assignments
 3. Writer Agents (gemini-3-flash-preview) - Write sections in parallel
-4. Reviewer Agent (claude-opus-4-5-20251101) - Reviews and improves coherence
+4. Reviewer Agent (gemini-3-flash-preview) - Reviews and improves coherence
 
 Run with:
     python examples/deep_research.py "Your research topic"
@@ -18,6 +18,7 @@ import sys
 import time
 import json
 import requests
+from datetime import datetime
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel
@@ -60,7 +61,6 @@ class PlannerOutput(BaseModel):
 class WriterOutput(BaseModel):
     """Output schema for the writer agent."""
     content: str
-    sources_used: list[str]
 
 
 class SummaryOutput(BaseModel):
@@ -80,6 +80,39 @@ class Metrics:
     start_time: float = field(default_factory=time.time)
 
 metrics = Metrics()
+
+
+def get_datetime_xml() -> str:
+    """Get current datetime as XML section for prompts."""
+    now = datetime.now()
+    return f"<datetime>Today is {now.strftime('%A, %B %d, %Y')} at {now.strftime('%I:%M %p')}.</datetime>"
+
+
+def clean_content(content: str) -> str:
+    """Remove any embedded <finish> tags or JSON artifacts from content.
+
+    This handles cases where the LLM accidentally embeds finish syntax
+    inside the content string itself.
+    """
+    if not content:
+        return content
+
+    import re
+
+    # Remove <finish> tags and everything after them
+    content = re.sub(r'<finish>.*', '', content, flags=re.DOTALL)
+
+    # Remove </finish> tags
+    content = re.sub(r'</finish>', '', content)
+
+    # Remove any trailing incomplete JSON that might have leaked
+    content = re.sub(r'\{"content":\s*".*$', '', content, flags=re.DOTALL)
+
+    # Clean up extra whitespace
+    content = content.strip()
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    return content
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -210,6 +243,8 @@ SEARCH_AGENT_PROMPT = """<role>
 You are an adaptive research source collector. Gather high-quality, diverse sources through intelligent searching.
 </role>
 
+{datetime_xml}
+
 <tools>
 - intent(message: str) → None  # Declare what you're looking for
 - search(query: str, num_results: int) → list[dict]  # Search the web
@@ -272,12 +307,23 @@ finish({"topic": "Impact of climate change on global agriculture", "total_source
 </example>
 
 <output_format>
+IMPORTANT: You MUST call finish() as a function in a <code> block. Do NOT use <finish> XML tags.
+
+```python
 finish({
     "topic": "the research topic",
     "total_sources": len(collected_sources),
     "sources": collected_sources
 })
+```
 </output_format>
+
+<rules>
+- You MUST call search() at least once before calling finish()
+- NEVER fabricate or make up sources - only use real results from search()
+- All sources in finish() must come from collected_sources (which comes from review())
+- If you haven't called search(), call it first before attempting to finish
+</rules>
 
 <constraints>
 NO: def, lambda, try/except, dict comprehensions, import, class
@@ -288,6 +334,8 @@ YES: variables, loops, list comprehensions, f-strings, builtins
 PLANNER_PROMPT = """<role>
 You are a research planner. Given collected sources, create a comprehensive report outline with sections AND subsections.
 </role>
+
+{datetime_xml}
 
 <context>
 You have access to pre-collected sources via the context. Use ONLY these sources.
@@ -360,6 +408,8 @@ WRITER_PROMPT = """<role>
 You are a research writer. Write comprehensive content for ONE section using provided sources.
 </role>
 
+{datetime_xml}
+
 <context>
 You have access to:
 - Section info with title, description, and SUBSECTIONS to cover
@@ -382,10 +432,14 @@ You have access to:
 </requirements>
 
 <output_format>
-finish({
-    "content": "### Subsection 1\\n\\nContent with [N] citations...\\n\\n### Subsection 2\\n\\nMore content...",
-    "sources_used": ["url1", "url2", ...]
-})
+When done, output your result in a <finish> block with JSON:
+
+<finish>
+{"content": "### Subsection 1\n\nYour markdown content with [N] citations...\n\n### Subsection 2\n\nMore content..."}
+</finish>
+
+CRITICAL: The "content" field must contain ONLY pure markdown text.
+Do NOT put any <finish> tags, JSON, or code blocks inside the content string.
 </output_format>
 
 <constraints>
@@ -397,6 +451,8 @@ YES: variables, loops, list comprehensions, f-strings, builtins
 REVIEWER_PROMPT = """<role>
 You are an expert editor reviewing a research report for coherence and quality.
 </role>
+
+{datetime_xml}
 
 <tools>
 edit(section: int, action: str, text: str = None, old: str = None, new: str = None)
@@ -431,6 +487,8 @@ YES: variables, loops, list comprehensions, f-strings, builtins
 SUMMARY_PROMPT = """<role>
 You are an expert research analyst writing executive summaries and conclusions for comprehensive reports.
 </role>
+
+{datetime_xml}
 
 <context>
 You have access to:
@@ -490,7 +548,7 @@ def run_search_agent(topic: str) -> dict:
     agent = Agent(
         "gemini-3-flash-preview",
         max_iterations=12,
-        system=SEARCH_AGENT_PROMPT
+        system=SEARCH_AGENT_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
 
     @agent.on("iteration_start")
@@ -544,7 +602,7 @@ def run_search_agent(topic: str) -> dict:
 def run_planner_agent(topic: str, sources: list, ctx: Context) -> dict:
     """Stage 2: Create outline with source assignments."""
     print("\n" + "═" * 70)
-    print("  STAGE 2: PLANNING (claude-opus-4-5-20251101)")
+    print("  STAGE 2: PLANNING (gemini-3-flash-preview)")
     print("═" * 70 + "\n")
 
     # Store sources in context
@@ -559,9 +617,9 @@ def run_planner_agent(topic: str, sources: list, ctx: Context) -> dict:
     ctx.set("sources_list", sources)
 
     agent = Agent(
-        "claude-opus-4-5-20251101",
+        "gemini-3-flash-preview",
         max_iterations=5,
-        system=PLANNER_PROMPT
+        system=PLANNER_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
     agent.from_context(ctx, "sources")
 
@@ -664,7 +722,7 @@ def run_writers_parallel(sections: list, all_sources: list) -> list:
     agent = Agent(
         "gemini-3-flash-preview",
         max_iterations=8,
-        system=WRITER_PROMPT
+        system=WRITER_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
 
     @agent.on("finish")
@@ -690,14 +748,12 @@ def run_writers_parallel(sections: list, all_sources: list) -> list:
         if isinstance(result, dict):
             written_sections.append({
                 "title": section.get("title", "Untitled"),
-                "content": result.get("content", ""),
-                "sources_used": result.get("sources_used", [])
+                "content": clean_content(result.get("content", ""))
             })
         else:
             written_sections.append({
                 "title": section.get("title", "Untitled"),
-                "content": str(result),
-                "sources_used": []
+                "content": clean_content(str(result))
             })
 
     print(f"\n  ✅ All {len(sections)} sections written")
@@ -707,15 +763,15 @@ def run_writers_parallel(sections: list, all_sources: list) -> list:
 def run_reviewer_agent(sections: list, report_title: str) -> list:
     """Stage 4: Review and improve coherence."""
     print("\n" + "═" * 70)
-    print("  STAGE 4: REVIEW (claude-opus-4-5-20251101)")
+    print("  STAGE 4: REVIEW (gemini-3-flash-preview)")
     print("═" * 70 + "\n")
 
     mutable_sections = list(sections)
 
     agent = Agent(
-        "claude-opus-4-5-20251101",
+        "gemini-3-flash-preview",
         max_iterations=8,
-        system=REVIEWER_PROMPT
+        system=REVIEWER_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
 
     @agent.tool
@@ -770,13 +826,13 @@ Add transitions to sections 2+, remove redundancy, then call finish("summary")."
 def run_summary_agent(sections: list, report_title: str, topic: str) -> dict:
     """Stage 5: Generate executive summary and conclusion."""
     print("\n" + "═" * 70)
-    print("  STAGE 5: SUMMARY & CONCLUSION (claude-opus-4-5-20251101)")
+    print("  STAGE 5: SUMMARY & CONCLUSION (gemini-3-flash-preview)")
     print("═" * 70 + "\n")
 
     agent = Agent(
-        "claude-opus-4-5-20251101",
+        "gemini-3-flash-preview",
         max_iterations=5,
-        system=SUMMARY_PROMPT
+        system=SUMMARY_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
 
     # Build full report content for context
@@ -812,7 +868,7 @@ Generate a compelling executive summary (200-300 words) and a thoughtful conclus
 
 def main():
     # Check API keys (GEMINI_API_KEY is an alternative to GOOGLE_API_KEY)
-    required_keys = ["EXA_API_KEY", "CEREBRAS_API_KEY", "ANTHROPIC_API_KEY"]
+    required_keys = ["EXA_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY"]
     missing = [k for k in required_keys if not os.environ.get(k)]
     if not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
         missing.append("GOOGLE_API_KEY or GEMINI_API_KEY")
