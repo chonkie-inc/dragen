@@ -50,6 +50,36 @@ struct ExaResult {
     author: Option<String>,
 }
 
+// Cerebras Chat Completion API structs
+#[derive(Serialize)]
+struct CerebrasRequest {
+    model: String,
+    messages: Vec<CerebrasMessage>,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct CerebrasMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct CerebrasResponse {
+    choices: Vec<CerebrasChoice>,
+}
+
+#[derive(Deserialize)]
+struct CerebrasChoice {
+    message: CerebrasMessageContent,
+}
+
+#[derive(Deserialize)]
+struct CerebrasMessageContent {
+    content: String,
+}
+
 /// Search the web using Exa API
 fn search_web(query: String, num_results: i64, search_count: Arc<AtomicUsize>) -> PyValue {
     let api_key = match env::var("EXA_API_KEY") {
@@ -127,6 +157,167 @@ fn search_web(query: String, num_results: i64, search_count: Arc<AtomicUsize>) -
     }
 }
 
+/// Review search results using Cerebras llama-3.3-70b for fast batch filtering
+fn review_sources(results: &[PyValue], topic: &str, review_count: Arc<AtomicUsize>) -> PyValue {
+    let api_key = match env::var("CEREBRAS_API_KEY") {
+        Ok(key) => key,
+        Err(_) => return PyValue::Str("Error: CEREBRAS_API_KEY not set".to_string()),
+    };
+
+    // Extract source info from PyValue list
+    let mut sources_text = String::new();
+    for (i, result) in results.iter().enumerate() {
+        if let PyValue::Dict(fields) = result {
+            let title = fields
+                .iter()
+                .find(|(k, _)| k == "title")
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("Unknown");
+            let url = fields
+                .iter()
+                .find(|(k, _)| k == "url")
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let snippet = fields
+                .iter()
+                .find(|(k, _)| k == "snippet")
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("");
+
+            sources_text.push_str(&format!(
+                "[{}] Title: {}\nURL: {}\nSnippet: {}\n\n",
+                i, title, url, &snippet.chars().take(400).collect::<String>()
+            ));
+        }
+    }
+
+    let count = review_count.fetch_add(1, Ordering::SeqCst) + 1;
+    let start = Instant::now();
+
+    let prompt = format!(
+        r#"You are a research relevance evaluator. Review these search results for the topic: "{}"
+
+For each source, determine if it's RELEVANT or NOT RELEVANT to the research topic.
+
+Sources to review:
+{}
+
+Respond with a JSON array. For each source, include:
+- "index": the source number
+- "relevant": true or false
+- "reason": brief explanation (10-20 words)
+
+Example response:
+[
+  {{"index": 0, "relevant": true, "reason": "Directly discusses AI agent architectures and design patterns"}},
+  {{"index": 1, "relevant": false, "reason": "About general machine learning, not specifically agents"}}
+]
+
+Respond ONLY with the JSON array, no other text."#,
+        topic, sources_text
+    );
+
+    let request = CerebrasRequest {
+        model: "llama-3.3-70b".to_string(),
+        messages: vec![CerebrasMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        temperature: 0.1,
+        max_tokens: 2048,
+    };
+
+    let response = ureq::post("https://api.cerebras.ai/v1/chat/completions")
+        .header("Authorization", &format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .send_json(&request);
+
+    let elapsed = start.elapsed();
+
+    match response {
+        Ok(mut resp) => match resp.body_mut().read_json::<CerebrasResponse>() {
+            Ok(data) => {
+                let content = &data.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
+
+                // Parse the JSON response
+                let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(content);
+
+                match parsed {
+                    Ok(reviews) => {
+                        let mut relevant_sources = Vec::new();
+                        let mut relevant_count = 0;
+                        let mut rejected_count = 0;
+                        let mut rejected_titles: Vec<String> = Vec::new();
+
+                        for review in &reviews {
+                            let index = review.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            let is_relevant = review.get("relevant").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let reason = review.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+                            if let Some(PyValue::Dict(fields)) = results.get(index) {
+                                let title = fields
+                                    .iter()
+                                    .find(|(k, _)| k == "title")
+                                    .and_then(|(_, v)| v.as_str())
+                                    .unwrap_or("Unknown");
+                                let url = fields
+                                    .iter()
+                                    .find(|(k, _)| k == "url")
+                                    .and_then(|(_, v)| v.as_str())
+                                    .unwrap_or("");
+                                let snippet = fields
+                                    .iter()
+                                    .find(|(k, _)| k == "snippet")
+                                    .and_then(|(_, v)| v.as_str())
+                                    .unwrap_or("");
+
+                                if is_relevant {
+                                    relevant_sources.push(PyValue::Dict(vec![
+                                        ("title".to_string(), PyValue::Str(title.to_string())),
+                                        ("url".to_string(), PyValue::Str(url.to_string())),
+                                        ("snippet".to_string(), PyValue::Str(snippet.chars().take(200).collect())),
+                                        ("relevance".to_string(), PyValue::Str(reason.to_string())),
+                                    ]));
+                                    relevant_count += 1;
+                                } else {
+                                    rejected_titles.push(format!("{}... ({})", &title.chars().take(50).collect::<String>(), reason));
+                                    rejected_count += 1;
+                                }
+                            }
+                        }
+
+                        println!(
+                            "    📋 [Review {}] {} sources → {} relevant, {} rejected ({:.1}s)",
+                            count,
+                            results.len(),
+                            relevant_count,
+                            rejected_count,
+                            elapsed.as_secs_f64()
+                        );
+
+                        // Show rejected sources for debugging
+                        for rejected in &rejected_titles {
+                            println!("       ✗ {}", rejected);
+                        }
+
+                        PyValue::List(relevant_sources)
+                    }
+                    Err(e) => {
+                        println!("    ⚠️  Review parse error: {}", e);
+                        // Return original results if parsing fails
+                        PyValue::List(results.to_vec())
+                    }
+                }
+            }
+            Err(e) => PyValue::Str(format!("Error parsing Cerebras response: {}", e)),
+        },
+        Err(ureq::Error::StatusCode(code)) => {
+            PyValue::Str(format!("Cerebras HTTP error {}", code))
+        }
+        Err(e) => PyValue::Str(format!("Cerebras request error: {:?}", e)),
+    }
+}
+
 const SYSTEM_PROMPT: &str = r#"<role>
 You are a Deep Research Source Collector with strong analytical thinking. Your task is to efficiently gather high-quality, diverse sources through strategic searching.
 </role>
@@ -141,64 +332,32 @@ EFFICIENCY IS KEY: Each search should yield 5-8 usable sources. If you're doing 
 </objective>
 
 <workflow>
-Work in focused cycles: THINK → SEARCH → REVIEW → DECIDE
+CRITICAL: Complete ALL steps in a SINGLE code block per round. Do NOT split across iterations.
 
-<step name="intent">
-REQUIRED: Before EVERY search round, call the intent() function:
+Each round = ONE code execution with: INTENT → SEARCH → REVIEW → DECIDE
+
+```python
+# === ROUND N (all in one code block) ===
 intent("What you're searching for and why")
 
-Keep it to one sentence. Example:
-intent("Looking for framework comparisons (LangChain, CrewAI, AutoGPT) to cover implementation options")
-</step>
+# Search
+results = search("query 1", 10) + search("query 2", 10)
 
-<step name="search">
-Execute 2-3 well-crafted searches per round. Quality queries > many queries:
-```python
-results_a = search("specific well-crafted query here", 10)
-results_b = search("different angle targeting gap", 10)
+# Review (uses fast LLM to filter)
+reviewed = review(results, "your research topic")
+collected_sources.extend(reviewed)
+
+# Decide
+print(f"Added {len(reviewed)} from {len(results)} results")
+print(f"Total: {len(collected_sources)} sources")
+print(f"Gaps: [what's missing]")
+# If gaps remain, continue to next round. If comprehensive, call finish()
 ```
-</step>
 
-<step name="review">
-CRITICALLY evaluate each result. Only add sources that are:
-- Directly relevant (not tangentially related)
-- From credible sources (academic, reputable tech blogs, official docs)
-- Adding NEW information (not duplicating existing sources)
-
-Review explicitly with clear accept/reject reasoning:
-```python
-# Review results_a
-for i, r in enumerate(results_a):
-    title = r.get("title", "")
-    url = r.get("url", "")
-    # Check relevance and quality
-    dominated_terms = ["agent", "workflow", "automation"]  # example
-    is_relevant = any(term in title.lower() for term in dominated_terms)
-    is_credible = any(domain in url for domain in ["arxiv", "github", "ieee", ".edu", "blog."])
-
-    if is_relevant and is_credible:
-        collected_sources.append({
-            "title": title,
-            "url": url,
-            "snippet": r.get("snippet", "")[:200],
-            "relevance": "Brief note on why this source is valuable"
-        })
-        print(f"✓ Added: {title[:60]}")
-    else:
-        print(f"✗ Skipped: {title[:60]} (reason: {'not relevant' if not is_relevant else 'not credible'})")
-```
-</step>
-
-<step name="decide">
-After each round, assess progress:
-```python
-print(f"\n=== Round Summary ===")
-print(f"Sources collected: {len(collected_sources)}")
-print(f"Coverage areas: [list what's covered]")
-print(f"Gaps remaining: [list what's missing]")
-print(f"Decision: {'CONTINUE - need more on X' or 'FINISH - comprehensive coverage achieved'}")
-```
-</step>
+EFFICIENCY RULES:
+- 2-3 search rounds total for most topics
+- Each round: 2 searches + 1 review + decide (all in ONE code block)
+- Never split search and review into separate iterations
 </workflow>
 
 <tools>
@@ -208,6 +367,11 @@ print(f"Decision: {'CONTINUE - need more on X' or 'FINISH - comprehensive covera
 - search(query: str, num_results: int) → list[dict]
   Returns: [{title, url, snippet, date, author}, ...]
   Tip: Use 10 results per search for better coverage
+
+- review(results: list, topic: str) → list[dict]
+  Uses fast LLM to filter sources. Returns only relevant ones with:
+  [{title, url, snippet, relevance}, ...]
+  The 'relevance' field explains why each source is valuable.
 
 - finish(result: dict) → Complete the task
 </tools>
@@ -287,6 +451,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Track metrics
     let search_count = Arc::new(AtomicUsize::new(0));
     let search_count_clone = search_count.clone();
+    let review_count = Arc::new(AtomicUsize::new(0));
+    let review_count_clone = review_count.clone();
     let start_time = Instant::now();
 
     // Configure agent with Cerebras ZAI GLM-4.7 (thinking model)
@@ -363,6 +529,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PyValue::None
     });
 
+    // Register the review tool for batch filtering with llama-3.3-70b
+    let review_info = ToolInfo::new("review", "Review and filter search results for relevance")
+        .arg_required("results", "list", "List of search results to review")
+        .arg_required("topic", "str", "The research topic for relevance evaluation")
+        .returns("list[dict]");
+
+    agent.register_tool(review_info, move |args| {
+        let results = args.get(0).and_then(|v| {
+            if let PyValue::List(items) = v {
+                Some(items.clone())
+            } else {
+                None
+            }
+        }).unwrap_or_default();
+        let topic = args
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        review_sources(&results, &topic, review_count_clone.clone())
+    });
+
     // Get topic from command line or use default
     let topic = env::args()
         .nth(1)
@@ -387,6 +575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(result) => {
             let elapsed = start_time.elapsed();
             let total_searches = search_count.load(Ordering::SeqCst);
+            let total_reviews = review_count.load(Ordering::SeqCst);
 
             println!("\n└──────────────────────────────────────────────────────────────────");
             println!();
@@ -397,6 +586,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  📊 Metrics:");
             println!("     Total time:     {:.1}s", elapsed.as_secs_f64());
             println!("     Search calls:   {}", total_searches);
+            println!("     Review calls:   {}", total_reviews);
             println!("     Sources found:  {}", result.total_sources);
             println!("     Complexity:     {}", result.complexity);
             if result.search_rounds > 0 {
