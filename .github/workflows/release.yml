@@ -8,6 +8,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Publish to crates.io
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   # Build Python wheels for PyPI
   build-wheels:
     name: Build wheels (${{ matrix.os }})
