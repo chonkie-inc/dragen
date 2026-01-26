@@ -353,6 +353,7 @@ fn event_type_for_event(event: &AgentEvent) -> &'static str {
         AgentEvent::IterationStart { .. } => "iteration_start",
         AgentEvent::LLMRequest { .. } => "llm_request",
         AgentEvent::LLMResponse { .. } => "llm_response",
+        AgentEvent::Thinking { .. } => "thinking",
         AgentEvent::CodeGenerated { .. } => "code_generated",
         AgentEvent::CodeExecuted { .. } => "code_executed",
         AgentEvent::ToolCall { .. } => "tool_call",
@@ -500,6 +501,9 @@ def make_decorator(agent, event_type):
                         let _ = dict.set_item("content", content.clone());
                         let _ = dict.set_item("tokens_used", *tokens_used);
                     }
+                    AgentEvent::Thinking { content } => {
+                        let _ = dict.set_item("content", content.clone());
+                    }
                     AgentEvent::CodeGenerated { code } => {
                         let _ = dict.set_item("code", code.clone());
                     }
@@ -537,6 +541,7 @@ def make_decorator(agent, event_type):
             "iteration_start" => inner.on_iteration_start(rust_callback),
             "llm_request" => inner.on_llm_request(rust_callback),
             "llm_response" => inner.on_llm_response(rust_callback),
+            "thinking" => inner.on_thinking(rust_callback),
             "code_generated" => inner.on_code_generated(rust_callback),
             "code_executed" => inner.on_code_executed(rust_callback),
             "tool_call" => inner.on_tool_call(rust_callback),
@@ -670,14 +675,33 @@ def make_decorator(agent, event_type):
     ///
     /// Args:
     ///     task: The task description for the agent
+    ///     schema: Optional JSON Schema dict for validating finish() output.
+    ///             If validation fails, error is sent to LLM for self-correction.
+    ///             Works with Pydantic: `schema=MyModel.model_json_schema()`
     ///
     /// Returns:
     ///     The result as a Python object (dict, list, string, etc.)
     ///
     /// Raises:
     ///     RuntimeError: If the agent fails (LLM error, sandbox error, etc.)
-    ///     ValueError: If the result cannot be deserialized
-    fn run(&mut self, py: Python<'_>, task: &str) -> PyResult<PyObject> {
+    ///     ValueError: If the result cannot be deserialized or schema validation fails
+    ///
+    /// Example:
+    ///     >>> from pydantic import BaseModel
+    ///     >>> class Output(BaseModel):
+    ///     ...     content: str
+    ///     ...     sources: list[str]
+    ///     >>> result = agent.run(task, schema=Output.model_json_schema())
+    #[pyo3(signature = (task, schema=None))]
+    fn run(&mut self, py: Python<'_>, task: &str, schema: Option<&Bound<'_, PyAny>>) -> PyResult<PyObject> {
+        // Set schema if provided
+        if let Some(schema_obj) = schema {
+            let schema_json = py_to_json(schema_obj)?;
+            self.inner.set_schema(schema_json);
+        } else {
+            self.inner.clear_schema();
+        }
+
         // Release GIL while running async code
         // Callbacks registered via @agent.on() use Python::with_gil() to re-acquire
         // the GIL and call Python functions during execution
@@ -693,7 +717,7 @@ def make_decorator(agent, event_type):
                 let err_str = format!("{}", e);
                 if err_str.contains("MaxIterations") {
                     Err(PyRuntimeError::new_err(format!("Agent reached maximum iterations: {}", e)))
-                } else if err_str.contains("Deserialization") {
+                } else if err_str.contains("Deserialization") || err_str.contains("Schema validation") {
                     Err(PyValueError::new_err(format!("Failed to parse result: {}", e)))
                 } else {
                     Err(PyRuntimeError::new_err(format!("Agent error: {}", e)))
@@ -751,23 +775,36 @@ def make_decorator(agent, event_type):
     ///     ... def search(query: str) -> list:
     ///     ...     """Search the web."""
     ///     ...     return []
-    #[pyo3(signature = (func=None, *, name=None))]
+    ///
+    /// For custom finish tools, use finish=True:
+    ///     >>> @agent.tool(finish=True)
+    ///     ... def finish(result: dict) -> dict:
+    ///     ...     """Custom finish with validation."""
+    ///     ...     if not result.get("sources"):
+    ///     ...         raise ValueError("No sources collected!")
+    ///     ...     return result
+    #[pyo3(signature = (func=None, *, name=None, finish=false))]
     fn tool(
         mut slf: PyRefMut<'_, Self>,
         py: Python<'_>,
         func: Option<PyObject>,
         name: Option<String>,
+        finish: bool,
     ) -> PyResult<PyObject> {
         // If func is provided, we're being called as @agent.tool (no parens)
         // If func is None, we're being called as @agent.tool() or @agent.tool(name="...")
         match func {
             Some(f) => {
                 // Direct decoration: @agent.tool
-                register_tool_from_function(&mut slf, py, f.clone_ref(py), name)?;
+                if finish {
+                    register_finish_from_function(&mut slf, py, f.clone_ref(py), name)?;
+                } else {
+                    register_tool_from_function(&mut slf, py, f.clone_ref(py), name)?;
+                }
                 Ok(f)
             }
             None => {
-                // Parameterized decoration: @agent.tool() or @agent.tool(name="...")
+                // Parameterized decoration: @agent.tool() or @agent.tool(name="...", finish=True)
                 // Return a decorator function
                 let name_clone = name.clone();
 
@@ -776,9 +813,12 @@ def make_decorator(agent, event_type):
                 let decorator = PyModule::from_code(
                     py,
                     c"
-def make_decorator(agent, name):
+def make_decorator(agent, name, is_finish):
     def decorator(func):
-        agent._register_tool_from_func(func, name)
+        if is_finish:
+            agent._register_finish_from_func(func, name)
+        else:
+            agent._register_tool_from_func(func, name)
         return func
     return decorator
 ",
@@ -787,7 +827,7 @@ def make_decorator(agent, name):
                 )?;
 
                 let make_decorator = decorator.getattr("make_decorator")?;
-                let result = make_decorator.call1((slf.into_pyobject(py)?, name_clone))?;
+                let result = make_decorator.call1((slf.into_pyobject(py)?, name_clone, finish))?;
                 Ok(result.into_py(py))
             }
         }
@@ -802,6 +842,17 @@ def make_decorator(agent, name):
         name: Option<String>,
     ) -> PyResult<()> {
         register_tool_from_function(self, py, func, name)
+    }
+
+    /// Internal method to register a finish tool from a function (called by decorator).
+    #[pyo3(name = "_register_finish_from_func", signature = (func, name=None))]
+    fn register_finish_from_func(
+        &mut self,
+        py: Python<'_>,
+        func: PyObject,
+        name: Option<String>,
+    ) -> PyResult<()> {
+        register_finish_from_function(self, py, func, name)
     }
 
     /// Run multiple tasks in parallel, each with a fresh agent clone.
@@ -826,7 +877,27 @@ def make_decorator(agent, name):
     ///     ...     "Write about topic B",
     ///     ...     "Write about topic C",
     ///     ... ])
-    fn map(&mut self, py: Python<'_>, tasks: Vec<String>) -> PyResult<PyObject> {
+    /// Run multiple tasks in parallel, each with a fresh agent clone.
+    ///
+    /// Creates independent agent instances with the same configuration and tools,
+    /// runs each task in parallel, and returns results in order.
+    ///
+    /// Args:
+    ///     tasks: List of task strings to run
+    ///     schema: Optional JSON Schema dict for validating finish() output (applied to all tasks)
+    ///
+    /// Returns:
+    ///     List of results in the same order as input tasks
+    #[pyo3(signature = (tasks, schema=None))]
+    fn map(&mut self, py: Python<'_>, tasks: Vec<String>, schema: Option<&Bound<'_, PyAny>>) -> PyResult<PyObject> {
+        // Set schema if provided (will be inherited by cloned agents)
+        if let Some(schema_obj) = schema {
+            let schema_json = py_to_json(schema_obj)?;
+            self.inner.set_schema(schema_json);
+        } else {
+            self.inner.clear_schema();
+        }
+
         // Use Rust-side parallel execution
         let result = py.allow_threads(|| {
             self.runtime.block_on(async {
@@ -841,6 +912,24 @@ def make_decorator(agent, name):
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Parallel execution failed: {}", e))),
         }
+    }
+
+    /// Set a JSON Schema for validating finish() output.
+    ///
+    /// This is useful when you want to set the schema once and run multiple tasks,
+    /// or when using map() for parallel execution.
+    ///
+    /// Args:
+    ///     schema: JSON Schema dict (e.g., from Pydantic's model_json_schema())
+    fn set_schema(&mut self, schema: &Bound<'_, PyAny>) -> PyResult<()> {
+        let schema_json = py_to_json(schema)?;
+        self.inner.set_schema(schema_json);
+        Ok(())
+    }
+
+    /// Clear the schema validation.
+    fn clear_schema(&mut self) {
+        self.inner.clear_schema();
     }
 }
 
@@ -979,6 +1068,137 @@ fn register_tool_from_function(
             }
 
             // Call with kwargs
+            match func_clone.call(py, (), Some(&kwargs)) {
+                Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
+                Err(e) => PyValue::Dict(vec![(
+                    "error".to_string(),
+                    PyValue::Str(format!("{}", e)),
+                )]),
+            }
+        })
+    });
+
+    Ok(())
+}
+
+/// Register a finish tool by introspecting a Python function's signature and docstring.
+/// Similar to register_tool_from_function but registers as the finish tool.
+fn register_finish_from_function(
+    agent: &mut Agent,
+    py: Python<'_>,
+    func: PyObject,
+    override_name: Option<String>,
+) -> PyResult<()> {
+    let func_bound = func.bind(py);
+
+    if !func_bound.is_callable() {
+        return Err(PyTypeError::new_err("func must be callable"));
+    }
+
+    // Get function name (default to "finish")
+    let func_name: String = match override_name {
+        Some(n) => n,
+        None => func_bound
+            .getattr("__name__")
+            .map(|n| n.extract::<String>().unwrap_or_else(|_| "finish".to_string()))
+            .unwrap_or_else(|_| "finish".to_string()),
+    };
+
+    // Get docstring for description
+    let description: String = func_bound
+        .getattr("__doc__")
+        .ok()
+        .and_then(|doc| {
+            if doc.is_none() {
+                None
+            } else {
+                doc.extract::<String>().ok()
+            }
+        })
+        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+        .unwrap_or_else(|| "Complete the task with the final result".to_string());
+
+    // Use inspect module to get signature
+    let inspect = py.import("inspect")?;
+    let signature = inspect.call_method1("signature", (&func,))?;
+    let parameters = signature.getattr("parameters")?;
+
+    // Build ToolInfo
+    let mut tool_info = RustToolInfo::new(&func_name, &description);
+
+    // Track parameter names for wrapper
+    let mut param_names: Vec<String> = Vec::new();
+    let mut param_defaults: Vec<Option<PyObject>> = Vec::new();
+
+    // Iterate over parameters
+    let items = parameters.call_method0("items")?;
+    for item in items.iter()? {
+        let item = item?;
+        let tuple = item.downcast::<pyo3::types::PyTuple>()?;
+        let param_name: String = tuple.get_item(0)?.extract()?;
+        let param = tuple.get_item(1)?;
+
+        // Skip *args and **kwargs
+        let kind: i32 = param.getattr("kind")?.extract()?;
+        if kind == 2 || kind == 4 {
+            continue;
+        }
+
+        param_names.push(param_name.clone());
+
+        // Get type annotation
+        let annotation = param.getattr("annotation")?;
+        let inspect_empty = inspect.getattr("Parameter")?.getattr("empty")?;
+        let type_str = if annotation.is(&inspect_empty) {
+            "any".to_string()
+        } else {
+            annotation
+                .getattr("__name__")
+                .map(|n| n.extract::<String>().unwrap_or_else(|_| "any".to_string()))
+                .unwrap_or_else(|_| {
+                    annotation
+                        .str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "any".to_string())
+                })
+        };
+
+        // Check if has default
+        let default = param.getattr("default")?;
+        let has_default = !default.is(&inspect_empty);
+
+        if has_default {
+            tool_info = tool_info.arg_optional(&param_name, &type_str, "");
+            param_defaults.push(Some(default.into_py(py)));
+        } else {
+            tool_info = tool_info.arg_required(&param_name, &type_str, "");
+            param_defaults.push(None);
+        }
+    }
+
+    // Create wrapper that converts positional args to kwargs
+    let func_clone = func.clone_ref(py);
+    let param_names_clone = param_names.clone();
+    let param_defaults_clone: Vec<Option<serde_json::Value>> = param_defaults
+        .iter()
+        .map(|d| d.as_ref().and_then(|obj| py_to_json(obj.bind(py)).ok()))
+        .collect();
+
+    // Register as finish tool instead of regular tool
+    agent.inner.register_finish(tool_info, move |args: Vec<PyValue>| {
+        Python::with_gil(|py| {
+            // Build kwargs dict
+            let kwargs = PyDict::new(py);
+
+            for (i, name) in param_names_clone.iter().enumerate() {
+                if i < args.len() {
+                    kwargs.set_item(name, pyvalue_to_py(py, &args[i])).unwrap();
+                } else if let Some(Some(default)) = param_defaults_clone.get(i) {
+                    kwargs.set_item(name, json_to_py(py, default)).unwrap();
+                }
+            }
+
+            // Call with kwargs - if it raises an exception, return error dict
             match func_clone.call(py, (), Some(&kwargs)) {
                 Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
                 Err(e) => PyValue::Dict(vec![(

@@ -25,6 +25,9 @@ thiserror = "2.0"
 # Regex for parsing code blocks
 regex = "1.11"
 
+# JSON Schema validation
+jsonschema = "0.29"
+
 # HTTP client (for examples)
 ureq = { version = "3", features = ["json"] }
 

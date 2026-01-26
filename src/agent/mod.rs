@@ -16,6 +16,7 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use convert::{format_pyvalue, json_to_pyvalue, pyvalue_to_string};
 use events::verbose_callbacks;
+use jsonschema::Validator;
 use littrs::{PyValue, Sandbox, ToolInfo};
 use prompt::{DEFAULT_SYSTEM, FINISH_MARKER, SYSTEM_PROMPT_TEMPLATE};
 use regex::Regex;
@@ -44,6 +45,10 @@ pub struct Agent {
     context_write: Option<String>,
     /// Callbacks for observability
     callbacks: AgentCallbacks,
+    /// Optional JSON Schema for validating finish() output
+    schema: Option<serde_json::Value>,
+    /// Compiled JSON Schema validator (for performance)
+    schema_validator: Option<Arc<Validator>>,
 }
 
 impl Clone for Agent {
@@ -66,6 +71,8 @@ impl Clone for Agent {
             context_reads: self.context_reads.clone(),
             context_write: self.context_write.clone(),
             callbacks: self.callbacks.clone(),
+            schema: self.schema.clone(),
+            schema_validator: self.schema_validator.clone(),
         }
     }
 }
@@ -96,6 +103,8 @@ impl Agent {
             context_reads: Vec::new(),
             context_write: None,
             callbacks: AgentCallbacks::default(),
+            schema: None,
+            schema_validator: None,
         }
     }
 
@@ -237,6 +246,114 @@ impl Agent {
             }
         }
         Vec::new()
+    }
+
+    // =========================================================================
+    // Schema validation
+    // =========================================================================
+
+    /// Set a JSON Schema for validating the finish() output.
+    ///
+    /// When set, the agent will validate the result against this schema after
+    /// finish() is called. If validation fails, an error message is sent back
+    /// to the LLM for self-correction.
+    ///
+    /// # Example (Rust)
+    ///
+    /// ```ignore
+    /// let schema = serde_json::json!({
+    ///     "type": "object",
+    ///     "required": ["content", "sources"],
+    ///     "properties": {
+    ///         "content": {"type": "string"},
+    ///         "sources": {"type": "array", "items": {"type": "string"}}
+    ///     }
+    /// });
+    /// let agent = Agent::with_model("gpt-4o").schema(schema);
+    /// ```
+    ///
+    /// # Example (Python with Pydantic)
+    ///
+    /// ```python
+    /// from pydantic import BaseModel
+    ///
+    /// class Output(BaseModel):
+    ///     content: str
+    ///     sources: list[str]
+    ///
+    /// result = agent.run(task, schema=Output.model_json_schema())
+    /// ```
+    pub fn schema(mut self, schema: serde_json::Value) -> Self {
+        // Compile the schema for validation
+        match Validator::new(&schema) {
+            Ok(validator) => {
+                self.schema = Some(schema);
+                self.schema_validator = Some(Arc::new(validator));
+            }
+            Err(e) => {
+                eprintln!("Warning: Invalid JSON Schema, validation disabled: {}", e);
+                self.schema = None;
+                self.schema_validator = None;
+            }
+        }
+        self
+    }
+
+    /// Set a JSON Schema from a raw JSON Value (for Python bindings).
+    #[doc(hidden)]
+    pub fn set_schema(&mut self, schema: serde_json::Value) {
+        match Validator::new(&schema) {
+            Ok(validator) => {
+                self.schema = Some(schema);
+                self.schema_validator = Some(Arc::new(validator));
+            }
+            Err(e) => {
+                eprintln!("Warning: Invalid JSON Schema, validation disabled: {}", e);
+                self.schema = None;
+                self.schema_validator = None;
+            }
+        }
+    }
+
+    /// Clear the schema validation.
+    pub fn clear_schema(&mut self) {
+        self.schema = None;
+        self.schema_validator = None;
+    }
+
+    /// Validate a value against the schema, returning a formatted error message if invalid.
+    fn validate_against_schema(&self, value: &serde_json::Value) -> std::result::Result<(), String> {
+        let Some(validator) = &self.schema_validator else {
+            return Ok(());
+        };
+
+        let result = validator.validate(value);
+        if result.is_ok() {
+            return Ok(());
+        }
+
+        // Collect validation errors into a readable message
+        let errors: Vec<String> = validator
+            .iter_errors(value)
+            .map(|e| format!("- {}: {}", e.instance_path, e))
+            .collect();
+
+        let schema_hint = if let Some(schema) = &self.schema {
+            if let Some(required) = schema.get("required") {
+                format!("\n\nExpected keys: {}", required)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        Err(format!(
+            "Schema validation failed:\n{}{}\n\nYour output:\n{}",
+            errors.join("\n"),
+            schema_hint,
+            serde_json::to_string_pretty(value).unwrap_or_default()
+        ))
     }
 
     // =========================================================================
@@ -570,15 +687,67 @@ impl Agent {
 
             // Check for direct <finish>JSON</finish> block first
             if let Some(finish_content) = self.extract_finish(&text) {
-                match serde_json::from_str::<T>(&finish_content) {
-                    Ok(result) => {
-                        if let Ok(json) = serde_json::to_value(&result) {
-                            self.emit(AgentEvent::Finish {
-                                value: json_to_pyvalue(&json),
+                // First parse as generic JSON for validation
+                match serde_json::from_str::<serde_json::Value>(&finish_content) {
+                    Ok(json_value) => {
+                        // Validate against schema if set
+                        if let Err(validation_error) = self.validate_against_schema(&json_value) {
+                            self.emit(AgentEvent::Error {
+                                message: format!("Schema validation failed: {}", validation_error),
                             });
+
+                            if iterations >= self.config.max_iterations {
+                                return Err(Error::Deserialization(format!(
+                                    "Schema validation failed: {}",
+                                    validation_error
+                                )));
+                            }
+
+                            self.messages.push(Message {
+                                role: Role::User,
+                                content: format!(
+                                    "Your output did not match the expected schema.\n\n{}\n\nPlease fix and try again.",
+                                    validation_error
+                                ),
+                                name: None,
+                                tool_call_id: None,
+                            });
+                            continue;
                         }
-                        self.save_to_context(&result);
-                        return Ok(result);
+
+                        // Now deserialize to the target type
+                        match serde_json::from_value::<T>(json_value.clone()) {
+                            Ok(result) => {
+                                self.emit(AgentEvent::Finish {
+                                    value: json_to_pyvalue(&json_value),
+                                });
+                                self.save_to_context(&result);
+                                return Ok(result);
+                            }
+                            Err(e) => {
+                                self.emit(AgentEvent::Error {
+                                    message: format!("Invalid JSON in <finish> block: {}", e),
+                                });
+
+                                if iterations >= self.config.max_iterations {
+                                    return Err(Error::Deserialization(format!(
+                                        "Invalid JSON in <finish> block: {}",
+                                        e
+                                    )));
+                                }
+
+                                self.messages.push(Message {
+                                    role: Role::User,
+                                    content: format!(
+                                        "Error parsing your <finish> block:\n\n{}\n\nYour output:\n```\n{}\n```\n\nPlease fix and try again.",
+                                        e, finish_content
+                                    ),
+                                    name: None,
+                                    tool_call_id: None,
+                                });
+                                continue;
+                            }
+                        }
                     }
                     Err(e) => {
                         self.emit(AgentEvent::Error {
@@ -623,11 +792,42 @@ impl Agent {
                 if output.contains(FINISH_MARKER) {
                     if let Ok(fa) = self.finish_answer.lock() {
                         if let Some(value) = fa.as_ref() {
+                            let json = pyvalue_to_json(value);
+
+                            // Validate against schema if set
+                            if let Err(validation_error) = self.validate_against_schema(&json) {
+                                self.emit(AgentEvent::Error {
+                                    message: format!("Schema validation failed: {}", validation_error),
+                                });
+
+                                if iterations >= self.config.max_iterations {
+                                    return Err(Error::Deserialization(format!(
+                                        "Schema validation failed: {}",
+                                        validation_error
+                                    )));
+                                }
+
+                                drop(fa);
+                                if let Ok(mut fa) = self.finish_answer.lock() {
+                                    *fa = None;
+                                }
+
+                                self.messages.push(Message {
+                                    role: Role::User,
+                                    content: format!(
+                                        "Your output did not match the expected schema.\n\n{}\n\nPlease fix and try again.",
+                                        validation_error
+                                    ),
+                                    name: None,
+                                    tool_call_id: None,
+                                });
+                                continue;
+                            }
+
                             self.emit(AgentEvent::Finish {
                                 value: value.clone(),
                             });
 
-                            let json = pyvalue_to_json(value);
                             match serde_json::from_value::<T>(json.clone()) {
                                 Ok(result) => {
                                     self.save_to_context(&result);
