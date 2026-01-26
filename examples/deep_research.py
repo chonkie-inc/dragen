@@ -47,8 +47,8 @@ class Section(BaseModel):
     """A single section in the research outline."""
     title: str
     description: str
+    subsections: list[str] = []
     source_urls: list[str]
-    key_points: list[str] = []
 
 
 class PlannerOutput(BaseModel):
@@ -61,6 +61,12 @@ class WriterOutput(BaseModel):
     """Output schema for the writer agent."""
     content: str
     sources_used: list[str]
+
+
+class SummaryOutput(BaseModel):
+    """Output schema for the summary agent."""
+    executive_summary: str
+    conclusion: str
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -280,7 +286,7 @@ YES: variables, loops, list comprehensions, f-strings, builtins
 
 
 PLANNER_PROMPT = """<role>
-You are a research planner. Given collected sources, create a comprehensive report outline.
+You are a research planner. Given collected sources, create a comprehensive report outline with sections AND subsections.
 </role>
 
 <context>
@@ -289,10 +295,11 @@ DO NOT search - sources are already provided.
 </context>
 
 <task>
-1. Review the provided sources
-2. Identify key themes and topics
-3. Create a 4-6 section outline
-4. Assign relevant sources to each section (by URL)
+1. Review the provided sources thoroughly
+2. Identify key themes, topics, and subtopics
+3. Create a 5-7 section outline (NOT including Executive Summary or Conclusion - those are auto-generated)
+4. Each section MUST have 2-4 subsections that guide the writer
+5. Assign relevant sources to each section (by URL)
 
 <output_format>
 Call finish() with:
@@ -302,9 +309,9 @@ finish({
     "sections": [
         {
             "title": "Section Title",
-            "description": "What this section covers",
-            "source_urls": ["url1", "url2", ...],
-            "key_points": ["point1", "point2", ...]
+            "description": "What this section covers in detail",
+            "subsections": ["Subsection 1 Title", "Subsection 2 Title", "Subsection 3 Title"],
+            "source_urls": ["url1", "url2", ...]
         },
         ...
     ]
@@ -312,10 +319,34 @@ finish({
 ```
 </output_format>
 
+<example>
+For a topic like "AI Agents":
+{
+    "title": "The State of AI Agents: A Comprehensive Analysis",
+    "sections": [
+        {
+            "title": "Foundations of AI Agents",
+            "description": "Core concepts, definitions, and architectural components",
+            "subsections": ["Defining AI Agents", "Core Components and Architecture", "Agent vs Traditional AI"],
+            "source_urls": ["url1", "url2", "url3"]
+        },
+        {
+            "title": "Design Patterns and Frameworks",
+            "description": "Common patterns for building agentic systems",
+            "subsections": ["ReAct and Reasoning Patterns", "Multi-Agent Architectures", "Popular Frameworks"],
+            "source_urls": ["url4", "url5", "url6"]
+        }
+    ]
+}
+</example>
+
 <rules>
-- Each section should have 3-6 assigned sources
+- Create 5-7 comprehensive sections (Executive Summary and Conclusion are added separately)
+- Each section MUST have 2-4 subsections
+- Subsections guide the writer on specific topics to cover as ### headers
+- Each section should have 4-8 assigned sources
 - Sources can be used in multiple sections if relevant
-- Focus on logical flow and comprehensive coverage
+- Focus on logical flow from foundational to advanced topics
 - NO searching - use only provided sources
 </rules>
 
@@ -331,12 +362,13 @@ You are a research writer. Write comprehensive content for ONE section using pro
 
 <context>
 You have access to:
-- Section info with title, description, key points
+- Section info with title, description, and SUBSECTIONS to cover
 - Assigned sources with NUMBER, title, and content
 </context>
 
 <requirements>
-- Write 400-600 words of substantive content
+- Write 500-800 words of substantive content
+- STRUCTURE: Include ALL provided subsections as ### headers
 - Include specific facts, numbers, and quotes from sources
 - CITATIONS: Add citation numbers in brackets at the END of each paragraph or bullet point
   - Format: [1], [2], [1, 3], etc. using the source numbers provided
@@ -344,14 +376,14 @@ You have access to:
   - Example: "AI coding assistants have seen rapid adoption in 2025. [1, 3]"
   - Example bullet: "- Cursor 2.0 introduces multi-agent architecture [2]"
 - You can mention source titles inline AND add citation numbers: "According to **Source Title**, ... [1]"
-- Use markdown formatting (headers, bullets, bold)
+- Use markdown formatting (### headers for subsections, bullets, bold)
 - DO NOT include the section title (## header) - it's added automatically
-- Start directly with content
+- Start directly with the first subsection (### header)
 </requirements>
 
 <output_format>
 finish({
-    "content": "Your markdown content here with [N] citations...",
+    "content": "### Subsection 1\\n\\nContent with [N] citations...\\n\\n### Subsection 2\\n\\nMore content...",
     "sources_used": ["url1", "url2", ...]
 })
 </output_format>
@@ -388,6 +420,52 @@ edit(section: int, action: str, text: str = None, old: str = None, new: str = No
 - Transitions: 1-2 sentences connecting to previous section
 - Only remove TRULY redundant content
 - Put ALL edits in ONE code block ending with finish()
+</rules>
+
+<constraints>
+NO: def, lambda, try/except, dict comprehensions, import, class
+YES: variables, loops, list comprehensions, f-strings, builtins
+</constraints>"""
+
+
+SUMMARY_PROMPT = """<role>
+You are an expert research analyst writing executive summaries and conclusions for comprehensive reports.
+</role>
+
+<context>
+You have access to:
+- The full report content with all sections
+- The original research topic
+- Source information
+</context>
+
+<task>
+Generate TWO pieces of content:
+1. EXECUTIVE SUMMARY: A compelling 200-300 word overview that:
+   - Opens with a strong statement about the topic's significance
+   - Highlights 3-5 key findings from the report
+   - Mentions important trends, numbers, or insights
+   - Provides context for why this matters now
+
+2. CONCLUSION: A 150-250 word closing that:
+   - Synthesizes the main themes across all sections
+   - Discusses implications and future outlook
+   - Ends with a forward-looking statement or call to action
+</task>
+
+<output_format>
+finish({
+    "executive_summary": "Your executive summary here...",
+    "conclusion": "Your conclusion here..."
+})
+</output_format>
+
+<rules>
+- Base content ONLY on what's in the report - no external information
+- Be specific - mention actual findings, numbers, and trends from the report
+- Executive summary should stand alone as a quick overview
+- Conclusion should tie everything together and look forward
+- Use professional, authoritative tone
 </rules>
 
 <constraints>
@@ -519,6 +597,8 @@ def run_planner_agent(topic: str, sources: list, ctx: Context) -> dict:
     print(f"\n  📋 Outline: {result.get('title', 'Untitled')}")
     for i, sec in enumerate(sections):
         print(f"     {i+1}. {sec.get('title', '')} ({len(sec.get('source_urls', []))} sources)")
+        for subsec in sec.get("subsections", []):
+            print(f"        • {subsec}")
 
     return result
 
@@ -527,16 +607,21 @@ def build_writer_task(section: dict, all_sources: list, url_to_num: dict) -> str
     """Build a task string for the writer agent with numbered sources."""
     title = section.get("title", "Untitled")
     description = section.get("description", "")
-    key_points = section.get("key_points", [])
+    subsections = section.get("subsections", [])
 
     # Get assigned sources with their global numbers
     assigned_urls = set(section.get("source_urls", []))
+
+    # Format subsections
+    subsections_str = "\n".join(f"  - {s}" for s in subsections) if subsections else "None specified"
 
     task = f"""Write content for this section:
 
 SECTION: {title}
 DESCRIPTION: {description}
-KEY POINTS: {', '.join(key_points) if key_points else 'None specified'}
+
+SUBSECTIONS TO COVER (use ### headers for each):
+{subsections_str}
 
 ASSIGNED SOURCES (use these citation numbers [N] at the end of paragraphs/bullets):
 
@@ -551,7 +636,7 @@ ASSIGNED SOURCES (use these citation numbers [N] at the end of paragraphs/bullet
                 task += f"    Content: {s.get('snippet', '')[:800]}\n\n"
                 break
 
-    task += "\nWrite comprehensive content using these sources. Add citation numbers like [1], [2, 3] at the END of each paragraph or bullet point."
+    task += "\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection. Add citation numbers like [1], [2, 3] at the END of each paragraph or bullet point."
     return task
 
 
@@ -682,6 +767,45 @@ Add transitions to sections 2+, remove redundancy, then call finish("summary")."
     return mutable_sections
 
 
+def run_summary_agent(sections: list, report_title: str, topic: str) -> dict:
+    """Stage 5: Generate executive summary and conclusion."""
+    print("\n" + "═" * 70)
+    print("  STAGE 5: SUMMARY & CONCLUSION (claude-opus-4-5-20251101)")
+    print("═" * 70 + "\n")
+
+    agent = Agent(
+        "claude-opus-4-5-20251101",
+        max_iterations=5,
+        system=SUMMARY_PROMPT
+    )
+
+    # Build full report content for context
+    report_content = f"REPORT TITLE: {report_title}\n"
+    report_content += f"TOPIC: {topic}\n\n"
+
+    for i, sec in enumerate(sections):
+        report_content += f"## {sec.get('title', 'Untitled')}\n\n"
+        report_content += sec.get("content", "") + "\n\n"
+
+    task = f"""Based on the following complete report, generate an executive summary and conclusion:
+
+{report_content}
+
+Generate a compelling executive summary (200-300 words) and a thoughtful conclusion (150-250 words) that synthesizes the key findings."""
+
+    try:
+        result = agent.run(task, schema=SummaryOutput.model_json_schema())
+        print(f"  ✅ Executive Summary: {len(result.get('executive_summary', ''))} chars")
+        print(f"  ✅ Conclusion: {len(result.get('conclusion', ''))} chars")
+        return result
+    except Exception as e:
+        print(f"  ⚠️ Summary generation error: {e}")
+        return {
+            "executive_summary": f"This report covers {len(sections)} key areas related to {topic}.",
+            "conclusion": "Further research is recommended to explore these topics in greater depth."
+        }
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -702,7 +826,7 @@ def main():
     print("  DEEP RESEARCH PIPELINE")
     print("═" * 70)
     print(f"\n  Topic: {topic}")
-    print(f"  Stages: Search → Plan → Write (parallel) → Review")
+    print(f"  Stages: Search → Plan → Write (parallel) → Review → Summary")
     print()
 
     ctx = Context()
@@ -730,6 +854,10 @@ def main():
     # Stage 4: Review
     reviewed_sections = run_reviewer_agent(written_sections, plan.get("title", topic))
 
+    # Stage 5: Generate executive summary and conclusion
+    report_title = plan.get("title", topic)
+    summary = run_summary_agent(reviewed_sections, report_title, topic)
+
     # Build final report
     elapsed = time.time() - start_time
 
@@ -737,11 +865,11 @@ def main():
     print("  FINAL REPORT")
     print("═" * 70 + "\n")
 
-    markdown = f"# {plan.get('title', topic)}\n\n"
+    markdown = f"# {report_title}\n\n"
 
     # Executive summary
     markdown += "## Executive Summary\n\n"
-    markdown += f"This report covers {len(reviewed_sections)} key areas based on analysis of {len(sources)} sources.\n\n"
+    markdown += summary.get("executive_summary", f"This report covers {len(reviewed_sections)} key areas based on analysis of {len(sources)} sources.") + "\n\n"
     markdown += "---\n\n"
 
     # Sections
@@ -749,8 +877,12 @@ def main():
         markdown += f"## {sec.get('title', 'Untitled')}\n\n"
         markdown += sec.get("content", "") + "\n\n"
 
+    # Conclusion
+    markdown += "## Conclusion\n\n"
+    markdown += summary.get("conclusion", "Further research is recommended.") + "\n\n"
+
     # Sources
-    markdown += "## Sources\n\n"
+    markdown += "---\n\n## Sources\n\n"
     seen_urls = set()
     for i, s in enumerate(sources):
         url = s.get("url", "")
