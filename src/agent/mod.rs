@@ -883,7 +883,8 @@ impl Agent {
     /// Run multiple tasks in parallel using cloned agents.
     ///
     /// Each task is run on a fresh clone of this agent, allowing parallel execution.
-    /// Results are returned in the same order as the input tasks.
+    /// Results are returned in the same order as the input tasks. Each result
+    /// indicates whether that specific task succeeded or failed.
     ///
     /// # Arguments
     ///
@@ -895,13 +896,20 @@ impl Agent {
     /// let agent = Agent::new(config);
     /// agent.register(search_tool::Tool);
     ///
-    /// let results: Vec<String> = agent.map(vec![
+    /// let results: Vec<Result<String>> = agent.map(vec![
     ///     "Write about topic A".to_string(),
     ///     "Write about topic B".to_string(),
     ///     "Write about topic C".to_string(),
-    /// ]).await?;
+    /// ]).await;
+    ///
+    /// for (i, result) in results.iter().enumerate() {
+    ///     match result {
+    ///         Ok(value) => println!("Task {} succeeded", i),
+    ///         Err(e) => println!("Task {} failed: {}", i, e),
+    ///     }
+    /// }
     /// ```
-    pub async fn map<T>(&self, tasks: Vec<String>) -> Result<Vec<T>>
+    pub async fn map<T>(&self, tasks: Vec<String>) -> Vec<Result<T>>
     where
         T: DeserializeOwned + Serialize + Send + 'static,
     {
@@ -915,10 +923,7 @@ impl Agent {
             })
             .collect();
 
-        let results = join_all(futures).await;
-
-        // Collect results, propagating first error if any
-        results.into_iter().collect()
+        join_all(futures).await
     }
 }
 

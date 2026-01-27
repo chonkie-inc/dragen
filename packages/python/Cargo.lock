@@ -917,7 +917,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "littrs"
-version = "0.3.0"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92e198cb02e65ef688978d1271ed60413dce01603ee4b84ae5caa8360b1fd75"
 dependencies = [
  "littrs-macros",
  "rustpython-parser",
@@ -926,7 +928,9 @@ dependencies = [
 
 [[package]]
 name = "littrs-macros"
-version = "0.3.0"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ca363714e4dc169a9f86c6415ab6a645c7b570d10dd8b71d9333ff74fab97f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1966,7 +1970,9 @@ dependencies = [
 
 [[package]]
 name = "tanukie"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ae18c067bc5a761ed483890ee57b5e7edb164aba39c72fda33844708645835f"
 dependencies = [
  "async-trait",
  "futures",

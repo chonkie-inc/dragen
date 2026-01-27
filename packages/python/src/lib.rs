@@ -858,13 +858,16 @@ def make_decorator(agent, name, is_finish):
     /// Run multiple tasks in parallel, each with a fresh agent clone.
     ///
     /// Creates independent agent instances with the same configuration and tools,
-    /// runs each task in parallel, and returns results in order.
+    /// runs each task in parallel, and returns results in order. Individual task
+    /// failures do not affect other tasks.
     ///
     /// Args:
     ///     tasks: List of task strings to run
+    ///     schema: Optional JSON Schema dict for validating finish() output (applied to all tasks)
     ///
     /// Returns:
-    ///     List of results in the same order as input tasks
+    ///     List of results in the same order as input tasks. Failed tasks return
+    ///     a dict with an "error" key containing the error message.
     ///
     /// Example:
     ///     >>> agent = Agent("gpt-4o")
@@ -877,17 +880,11 @@ def make_decorator(agent, name, is_finish):
     ///     ...     "Write about topic B",
     ///     ...     "Write about topic C",
     ///     ... ])
-    /// Run multiple tasks in parallel, each with a fresh agent clone.
-    ///
-    /// Creates independent agent instances with the same configuration and tools,
-    /// runs each task in parallel, and returns results in order.
-    ///
-    /// Args:
-    ///     tasks: List of task strings to run
-    ///     schema: Optional JSON Schema dict for validating finish() output (applied to all tasks)
-    ///
-    /// Returns:
-    ///     List of results in the same order as input tasks
+    ///     >>> for i, result in enumerate(results):
+    ///     ...     if "error" in result:
+    ///     ...         print(f"Task {i} failed: {result['error']}")
+    ///     ...     else:
+    ///     ...         print(f"Task {i} succeeded")
     #[pyo3(signature = (tasks, schema=None))]
     fn map(&mut self, py: Python<'_>, tasks: Vec<String>, schema: Option<&Bound<'_, PyAny>>) -> PyResult<PyObject> {
         // Set schema if provided (will be inherited by cloned agents)
@@ -898,20 +895,27 @@ def make_decorator(agent, name, is_finish):
             self.inner.clear_schema();
         }
 
-        // Use Rust-side parallel execution
-        let result = py.allow_threads(|| {
+        // Use Rust-side parallel execution - returns Vec<Result<T>>
+        let results = py.allow_threads(|| {
             self.runtime.block_on(async {
                 self.inner.map::<serde_json::Value>(tasks).await
             })
         });
 
-        match result {
-            Ok(values) => {
-                let py_results: Vec<PyObject> = values.iter().map(|v| json_to_py(py, v)).collect();
-                Ok(py_results.into_py(py))
-            }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Parallel execution failed: {}", e))),
-        }
+        // Convert each result - Ok becomes the value, Err becomes {"error": "..."}
+        let py_results: Vec<PyObject> = results
+            .into_iter()
+            .map(|r| match r {
+                Ok(value) => json_to_py(py, &value),
+                Err(e) => {
+                    let dict = PyDict::new(py);
+                    dict.set_item("error", format!("{}", e)).unwrap();
+                    dict.into_py(py)
+                }
+            })
+            .collect();
+
+        Ok(py_results.into_py(py))
     }
 
     /// Set a JSON Schema for validating finish() output.

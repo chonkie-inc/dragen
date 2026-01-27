@@ -4,9 +4,9 @@ Deep Research - Complete research pipeline with source collection.
 
 Combines deep searcher (source collection) with research pipeline (planning + writing):
 
-1. Search Agent (gemini-3-flash-preview) - Collects high-quality sources
+1. Search Agent (cerebras:zai-glm-4.7) - Collects high-quality sources
 2. Planner Agent (gemini-3-flash-preview) - Creates outline with source assignments
-3. Writer Agents (gemini-3-flash-preview) - Write sections in parallel
+3. Writer Agents (claude-sonnet-4-20250514) - Write sections in parallel
 4. Reviewer Agent (gemini-3-flash-preview) - Reviews and improves coherence
 
 Run with:
@@ -150,7 +150,7 @@ def search_web(query: str, num_results: int = 10) -> list:
             results.append({
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),
-                "snippet": text[:1500] if text else "",
+                "snippet": text[:8000] if text else "",  # More content for accurate citations
                 "date": r.get("publishedDate", ""),
             })
 
@@ -539,14 +539,14 @@ YES: variables, loops, list comprehensions, f-strings, builtins
 def run_search_agent(topic: str) -> dict:
     """Stage 1: Collect sources using deep searcher."""
     print("\n" + "═" * 70)
-    print("  STAGE 1: SOURCE COLLECTION (gemini-3-flash-preview)")
+    print("  STAGE 1: SOURCE COLLECTION (cerebras:zai-glm-4.7)")
     print("═" * 70 + "\n")
 
     # Track actual search calls to prevent hallucinated sources
     search_call_count = 0
 
     agent = Agent(
-        "gemini-3-flash-preview",
+        "cerebras:zai-glm-4.7",
         max_iterations=12,
         system=SEARCH_AGENT_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
@@ -689,9 +689,10 @@ ASSIGNED SOURCES (use these citation numbers [N] at the end of paragraphs/bullet
         for s in all_sources:
             if s.get("url") == url:
                 num = url_to_num.get(url, 0)
+                content = s.get('snippet', '') or s.get('content', '')
                 task += f"[{num}] **{s.get('title', 'Untitled')}**\n"
                 task += f"    URL: {url}\n"
-                task += f"    Content: {s.get('snippet', '')[:800]}\n\n"
+                task += f"    Content: {content[:8000]}\n\n"  # 8000 chars for better citation accuracy
                 break
 
     task += "\nWrite comprehensive content covering ALL subsections. Use ### headers for each subsection. Add citation numbers like [1], [2, 3] at the END of each paragraph or bullet point."
@@ -701,7 +702,7 @@ ASSIGNED SOURCES (use these citation numbers [N] at the end of paragraphs/bullet
 def run_writers_parallel(sections: list, all_sources: list) -> list:
     """Stage 3: Write all sections in parallel using agent.map()."""
     print("\n" + "═" * 70)
-    print("  STAGE 3: PARALLEL WRITING (gemini-3-flash-preview)")
+    print("  STAGE 3: PARALLEL WRITING (claude-sonnet-4-20250514)")
     print("═" * 70 + "\n")
 
     # Build URL -> source number mapping (1-indexed for citations)
@@ -718,9 +719,9 @@ def run_writers_parallel(sections: list, all_sources: list) -> list:
         tasks.append(task)
         print(f"  ▶ Queued section {i+1}/{len(sections)}: {section.get('title', 'Untitled')}")
 
-    # Create writer agent
+    # Create writer agent - using Sonnet for higher quality writing
     agent = Agent(
-        "gemini-3-flash-preview",
+        "claude-sonnet-4-20250514",
         max_iterations=8,
         system=WRITER_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )
