@@ -62,7 +62,7 @@ fn search(query: String) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut agent = Agent::new(AgentConfig::new("gpt-4o"));
+    let mut agent = Agent::new(AgentConfig::new("moonshotai/kimi-k2.5"));
     agent.register(search::Tool);
 
     let result: String = agent.run("Search for recent AI agent frameworks").await?;
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```python
 import dragen
 
-agent = dragen.Agent("gpt-4o")
+agent = dragen.Agent("moonshotai/kimi-k2.5")
 
 @agent.tool
 def search(query: str) -> str:
@@ -101,7 +101,7 @@ class Analysis(BaseModel):
     sentiment: str  # positive, negative, neutral
     confidence: float
 
-agent = dragen.Agent("gpt-4o")
+agent = dragen.Agent("moonshotai/kimi-k2.5")
 result = agent.run(
     "Analyze the sentiment of: 'This product is amazing!'",
     schema=Analysis.model_json_schema()
@@ -119,11 +119,11 @@ from dragen import Agent, Context
 ctx = Context()
 
 # Planner researches and writes a plan
-planner = Agent("gpt-4o").to_context(ctx, "plan")
+planner = Agent("moonshotai/kimi-k2.5").to_context(ctx, "plan")
 planner.run("Create a research plan for: quantum computing trends")
 
 # Writer reads the plan and produces content
-writer = Agent("gpt-4o").from_context(ctx, "plan")
+writer = Agent("moonshotai/kimi-k2.5").from_context(ctx, "plan")
 result = writer.run("Write a report based on the research plan")
 ```
 
@@ -135,7 +135,7 @@ RLMs let an LLM recursively call itself to process inputs far beyond its context
 sandbox = dragen.Sandbox(builtins=True)
 sandbox["document"] = very_long_text  # e.g. 500K tokens
 
-agent = dragen.Agent("gpt-4o", max_iterations=20, sandbox=sandbox)
+agent = dragen.Agent("moonshotai/kimi-k2.5", max_iterations=20, sandbox=sandbox)
 result = agent.run("""
 The variable `document` contains a very long research paper.
 Extract all key findings, then synthesize them into a structured summary.
@@ -155,7 +155,7 @@ sandbox.limit(max_instructions=50_000, max_recursion_depth=30)
 sandbox.mount("data.csv", "./input/data.csv")
 sandbox.mount("report.md", "./output/report.md", writable=True)
 
-agent = dragen.Agent("gpt-4o", sandbox=sandbox)
+agent = dragen.Agent("moonshotai/kimi-k2.5", sandbox=sandbox)
 result = agent.run("Read data.csv and write a summary report to report.md")
 ```
 
