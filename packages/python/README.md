@@ -1,6 +1,23 @@
-# dragen
+<div align="center">
 
-CodeAct-style AI agent framework for Python.
+![Dragen Logo](https://github.com/chonkie-inc/dragen/blob/main/assets/dragen.png?raw=true)
+
+# Dragen
+
+### CodeAct-style AI agents that write Python, not JSON.
+
+[![PyPI version](https://img.shields.io/pypi/v/dragen.svg)](https://pypi.org/project/dragen/)
+[![Crates.io](https://img.shields.io/crates/v/dragen.svg)](https://crates.io/crates/dragen)
+[![License](https://img.shields.io/github/license/chonkie-inc/dragen.svg)](https://github.com/chonkie-inc/dragen/blob/main/LICENSE)
+[![CI](https://github.com/chonkie-inc/dragen/actions/workflows/ci.yml/badge.svg)](https://github.com/chonkie-inc/dragen/actions/workflows/ci.yml)
+
+</div>
+
+---
+
+Instead of making your LLM fill in JSON schemas one tool call at a time, Dragen gives it a Python sandbox. The agent writes real code — loops, branches, error handling, multi-step reasoning — all in one shot. That's the [CodeAct](https://arxiv.org/abs/2402.01030) pattern.
+
+Code runs in a [Littrs](https://github.com/chonkie-inc/littrs) sandbox — a Python-to-bytecode compiler and stack VM embedded directly in your process. No containers, no cloud sandboxing services, no `exec()`. Zero ambient capabilities: no filesystem, no network, no env vars. The only way sandboxed code reaches the outside world is through tools you explicitly provide.
 
 ## Installation
 
@@ -11,36 +28,95 @@ pip install dragen
 ## Quick Start
 
 ```python
-from dragen import Agent
+import dragen
 
-# Create an agent
-agent = Agent("gpt-4o")
+agent = dragen.Agent("gpt-4o")
 
-# Register a tool
-def search(args):
-    query = args[0]
-    return {"results": [f"Found: {query}"]}
+@agent.tool
+def search(query: str) -> str:
+    """Search the web for information."""
+    return f"Results for: {query}"
 
-agent.register_function("search", search)
-
-# Run a task
-result = agent.run("Search for Python tutorials")
+result = agent.run("Search for recent AI agent frameworks")
 print(result)
 ```
 
-## Features
+## Examples
 
-- **CodeAct pattern**: LLM writes Python code to accomplish tasks
-- **Secure sandbox**: Code runs in a sandboxed environment
-- **Tool registration**: Expose Python functions as tools for the agent
-- **Multi-agent support**: Share data between agents via Context
+### Structured output with self-correction
+
+Pass a schema and the agent retries until the output validates:
+
+```python
+from pydantic import BaseModel
+
+class Analysis(BaseModel):
+    summary: str
+    sentiment: str  # positive, negative, neutral
+    confidence: float
+
+agent = dragen.Agent("gpt-4o")
+result = agent.run(
+    "Analyze the sentiment of: 'This product is amazing!'",
+    schema=Analysis.model_json_schema()
+)
+analysis = Analysis(**result)
+```
+
+### Multi-agent pipeline with shared context
+
+Agents pass typed data to each other through a shared `Context`:
+
+```python
+from dragen import Agent, Context
+
+ctx = Context()
+
+# Planner researches and writes a plan
+planner = Agent("gpt-4o").to_context(ctx, "plan")
+planner.run("Create a research plan for: quantum computing trends")
+
+# Writer reads the plan and produces content
+writer = Agent("gpt-4o").from_context(ctx, "plan")
+result = writer.run("Write a report based on the research plan")
+```
+
+### Sandbox with tools, limits, and file access
+
+```python
+sandbox = dragen.Sandbox(builtins=True)
+sandbox.limit(max_instructions=50_000, max_recursion_depth=30)
+sandbox.mount("data.csv", "./input/data.csv")
+
+@sandbox.tool
+def summarize(text: str) -> str:
+    """Summarize text using an external API."""
+    return call_summary_api(text)
+
+agent = dragen.Agent("gpt-4o", sandbox=sandbox)
+result = agent.run("Read data.csv and summarize its contents")
+```
+
+### Recursive Language Model ([RLM](https://arxiv.org/abs/2512.24601))
+
+Process inputs far beyond the context window — the long input lives in the sandbox as a variable and the agent writes code to slice and summarize it across iterations:
+
+```python
+sandbox = dragen.Sandbox(builtins=True)
+sandbox["document"] = very_long_text  # e.g. 500K tokens
+
+agent = dragen.Agent("gpt-4o", max_iterations=20, sandbox=sandbox)
+result = agent.run("""
+The variable `document` contains a very long research paper.
+Extract all key findings, then synthesize them into a structured summary.
+You can slice `document` with Python string indexing to read it in parts.
+""")
+```
 
 ## Configuration
 
 ```python
-from dragen import Agent
-
-agent = Agent(
+agent = dragen.Agent(
     "gpt-4o",
     max_iterations=10,
     temperature=0.7,
@@ -49,58 +125,25 @@ agent = Agent(
 )
 ```
 
-## Tool Registration
-
-### Simple function
+## Event Callbacks
 
 ```python
-def add(args):
-    return args[0] + args[1]
+agent = dragen.Agent("gpt-4o")
 
-agent.register_function("add", add)
+@agent.on_code
+def on_code(code):
+    print(f"Executing:\n{code}")
+
+@agent.on_output
+def on_output(output):
+    print(f"Output: {output}")
+
+@agent.on_finish
+def on_finish(result):
+    print(f"Done: {result}")
 ```
 
-### With type information
-
-```python
-from dragen import ToolInfo
-
-info = ToolInfo("search", "Search the web") \
-    .arg_required("query", "str", "The search query") \
-    .returns("dict")
-
-def search(args):
-    query = args[0]
-    return {"results": ["result1", "result2"]}
-
-agent.register_tool(info, search)
-```
-
-## Multi-Agent with Context
-
-```python
-from dragen import Agent, Context
-
-ctx = Context()
-
-# Planner writes output to context
-planner = Agent("gpt-4o")
-planner.to_context(ctx, "plan")
-planner.run("Create a research plan about AI")
-
-# Executor reads from context
-executor = Agent("gpt-4o")
-executor.from_context(ctx, "plan")
-executor.run("Execute the research plan")
-```
-
-## Environment Variables
-
-Set your API key based on the model provider:
-
-- `OPENAI_API_KEY` for OpenAI models (gpt-4o, etc.)
-- `ANTHROPIC_API_KEY` for Anthropic models (claude-*, etc.)
-- `GROQ_API_KEY` for Groq models
+For the full feature reference, see **[DOCS.md](https://github.com/chonkie-inc/dragen/blob/main/DOCS.md)**. More examples in **[examples/](https://github.com/chonkie-inc/dragen/tree/main/examples)**.
 
 ## License
 
