@@ -32,7 +32,8 @@ To return structured data directly, use a <finish> block:
 <rules>
 - Write ONE code block per response, then STOP and wait for results
 - Do NOT assume or predict output - you will see actual results after execution
-- Only use functions listed above - no imports allowed
+- Only use functions listed above and standard Python builtins
+- You may import json, math, and typing
 - Use print() to see values
 - Variables persist between executions
 - When done, either call finish(answer) in code OR use a <finish>JSON</finish> block for structured output

@@ -71,10 +71,10 @@ fn search(query: String, num_results: Option<i64>) -> PyValue {
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
                             (
-                                "text".to_string(),
+                                PyValue::Str("text".to_string()),
                                 PyValue::Str(r.text.unwrap_or_default().chars().take(500).collect()),
                             ),
                         ])

@@ -117,9 +117,9 @@ fn search_web(query: String, num_results: i64, search_log: Option<SearchLog>, se
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
-                            ("text".to_string(), PyValue::Str(r.text.unwrap_or_default())),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
+                            (PyValue::Str("text".to_string()), PyValue::Str(r.text.unwrap_or_default())),
                         ])
                     })
                     .collect();
@@ -140,8 +140,8 @@ fn register_search_tool(agent: &mut Agent, search_counter: Option<SearchCounter>
 /// Register search tool with optional result capture
 fn register_search_tool_with_log(agent: &mut Agent, search_log: Option<SearchLog>, search_counter: Option<SearchCounter>) {
     let search_info = ToolInfo::new("search", "Search the web for information on a topic")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("limit", "int", "Number of results (1-10, default 5)")
+        .arg("query", "str", "The search query")
+        .arg_opt("limit", "int", "Number of results (1-10, default 5)")
         .returns("list");
 
     agent.register_tool(search_info, move |args| {
@@ -398,11 +398,11 @@ fn create_reviewer_agent(sections: Arc<Mutex<Vec<SectionResult>>>) -> Agent {
     // Register the edit tool
     let sections_clone = Arc::clone(&sections);
     let edit_info = ToolInfo::new("edit", "Edit a section of the report")
-        .arg_required("section", "int", "Section number (1-based)")
-        .arg_required("action", "str", "One of: prepend, append, remove, replace")
-        .arg_optional("text", "str", "Text to add (prepend/append) or remove")
-        .arg_optional("old", "str", "Text to find (replace)")
-        .arg_optional("new", "str", "Replacement text (replace)")
+        .arg("section", "int", "Section number (1-based)")
+        .arg("action", "str", "One of: prepend, append, remove, replace")
+        .arg_opt("text", "str", "Text to add (prepend/append) or remove")
+        .arg_opt("old", "str", "Text to find (replace)")
+        .arg_opt("new", "str", "Replacement text (replace)")
         .returns("str");
 
     agent.register_tool(edit_info, move |args| {

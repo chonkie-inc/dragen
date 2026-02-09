@@ -72,10 +72,10 @@ fn search_web(query: String, num_results: i64) -> PyValue {
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
                             (
-                                "snippet".to_string(),
+                                PyValue::Str("snippet".to_string()),
                                 PyValue::Str(r.text.unwrap_or_default()),
                             ),
                         ])
@@ -92,8 +92,8 @@ fn search_web(query: String, num_results: i64) -> PyValue {
 
 fn register_search_tool(agent: &mut Agent) {
     let search_info = ToolInfo::new("search", "Search the web for information")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("num_results", "int", "Number of results (1-10, default 5)")
+        .arg("query", "str", "The search query")
+        .arg_opt("num_results", "int", "Number of results (1-10, default 5)")
         .returns("list");
 
     agent.register_tool(search_info, |args| {
@@ -191,7 +191,7 @@ fn create_planner_agent() -> Agent {
 
     // Custom finish tool that expects a dictionary of sections
     let finish_info = ToolInfo::new("finish", "Return the research sections as a structured plan")
-        .arg_required("sections", "dict", "Dictionary mapping section titles to research descriptions")
+        .arg("sections", "dict", "Dictionary mapping section titles to research descriptions")
         .returns("dict");
 
     agent.register_finish(finish_info, |args| {
@@ -212,7 +212,7 @@ fn create_researcher_agent() -> Agent {
 
     // Add notes tool
     let notes_info = ToolInfo::new("note", "Save a research note")
-        .arg_required("content", "str", "The note content")
+        .arg("content", "str", "The note content")
         .returns("str");
 
     let notes: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -234,7 +234,7 @@ fn create_researcher_agent() -> Agent {
 
     // Custom finish tool expecting structured output with content and sources
     let finish_info = ToolInfo::new("finish", "Return section content with sources")
-        .arg_required("result", "dict", "Dict with 'content' (str) and 'sources' (list of str)")
+        .arg("result", "dict", "Dict with 'content' (str) and 'sources' (list of str)")
         .returns("dict");
 
     agent.register_finish(finish_info, |args| {
@@ -260,12 +260,12 @@ fn extract_section_from_pyvalue(value: &PyValue) -> (String, Vec<String>) {
 
             for (key, val) in pairs {
                 match key.as_str() {
-                    "content" => {
+                    Some("content") => {
                         if let PyValue::Str(s) = val {
                             content = s.clone();
                         }
                     }
-                    "sources" => {
+                    Some("sources") => {
                         if let PyValue::List(items) = val {
                             for item in items {
                                 if let PyValue::Str(s) = item {

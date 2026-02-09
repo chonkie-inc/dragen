@@ -127,20 +127,20 @@ fn search_web(query: String, num_results: i64, search_count: Arc<AtomicUsize>) -
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
                             (
-                                "snippet".to_string(),
+                                PyValue::Str("snippet".to_string()),
                                 PyValue::Str(
                                     r.text.unwrap_or_default().chars().take(800).collect(),
                                 ),
                             ),
                             (
-                                "date".to_string(),
+                                PyValue::Str("date".to_string()),
                                 PyValue::Str(r.published_date.unwrap_or_default()),
                             ),
                             (
-                                "author".to_string(),
+                                PyValue::Str("author".to_string()),
                                 PyValue::Str(r.author.unwrap_or_default()),
                             ),
                         ])
@@ -170,17 +170,17 @@ fn review_sources(results: &[PyValue], topic: &str, review_count: Arc<AtomicUsiz
         if let PyValue::Dict(fields) = result {
             let title = fields
                 .iter()
-                .find(|(k, _)| k == "title")
+                .find(|(k, _)| k.as_str() == Some("title"))
                 .and_then(|(_, v)| v.as_str())
                 .unwrap_or("Unknown");
             let url = fields
                 .iter()
-                .find(|(k, _)| k == "url")
+                .find(|(k, _)| k.as_str() == Some("url"))
                 .and_then(|(_, v)| v.as_str())
                 .unwrap_or("");
             let snippet = fields
                 .iter()
-                .find(|(k, _)| k == "snippet")
+                .find(|(k, _)| k.as_str() == Some("snippet"))
                 .and_then(|(_, v)| v.as_str())
                 .unwrap_or("");
 
@@ -257,26 +257,26 @@ Respond ONLY with the JSON array, no other text."#,
                             if let Some(PyValue::Dict(fields)) = results.get(index) {
                                 let title = fields
                                     .iter()
-                                    .find(|(k, _)| k == "title")
+                                    .find(|(k, _)| k.as_str() == Some("title"))
                                     .and_then(|(_, v)| v.as_str())
                                     .unwrap_or("Unknown");
                                 let url = fields
                                     .iter()
-                                    .find(|(k, _)| k == "url")
+                                    .find(|(k, _)| k.as_str() == Some("url"))
                                     .and_then(|(_, v)| v.as_str())
                                     .unwrap_or("");
                                 let snippet = fields
                                     .iter()
-                                    .find(|(k, _)| k == "snippet")
+                                    .find(|(k, _)| k.as_str() == Some("snippet"))
                                     .and_then(|(_, v)| v.as_str())
                                     .unwrap_or("");
 
                                 if is_relevant {
                                     relevant_sources.push(PyValue::Dict(vec![
-                                        ("title".to_string(), PyValue::Str(title.to_string())),
-                                        ("url".to_string(), PyValue::Str(url.to_string())),
-                                        ("snippet".to_string(), PyValue::Str(snippet.chars().take(200).collect())),
-                                        ("relevance".to_string(), PyValue::Str(reason.to_string())),
+                                        (PyValue::Str("title".to_string()), PyValue::Str(title.to_string())),
+                                        (PyValue::Str("url".to_string()), PyValue::Str(url.to_string())),
+                                        (PyValue::Str("snippet".to_string()), PyValue::Str(snippet.chars().take(200).collect())),
+                                        (PyValue::Str("relevance".to_string()), PyValue::Str(reason.to_string())),
                                     ]));
                                     relevant_count += 1;
                                 } else {
@@ -500,8 +500,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register the search tool with timing
     let search_info = ToolInfo::new("search", "Search the web using Exa")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("num_results", "int", "Number of results (1-10, default 8)")
+        .arg("query", "str", "The search query")
+        .arg_opt("num_results", "int", "Number of results (1-10, default 8)")
         .returns("list[dict]");
 
     agent.register_tool(search_info, move |args| {
@@ -516,7 +516,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register the intent tool for declaring search intentions
     let intent_info = ToolInfo::new("intent", "Declare your intent before searching")
-        .arg_required("message", "str", "Brief description of what you're searching for and why")
+        .arg("message", "str", "Brief description of what you're searching for and why")
         .returns("None");
 
     agent.register_tool(intent_info, |args| {
@@ -531,8 +531,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register the review tool for batch filtering with llama-3.3-70b
     let review_info = ToolInfo::new("review", "Review and filter search results for relevance")
-        .arg_required("results", "list", "List of search results to review")
-        .arg_required("topic", "str", "The research topic for relevance evaluation")
+        .arg("results", "list", "List of search results to review")
+        .arg("topic", "str", "The research topic for relevance evaluation")
         .returns("list[dict]");
 
     agent.register_tool(review_info, move |args| {

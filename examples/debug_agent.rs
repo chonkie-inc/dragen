@@ -23,8 +23,8 @@ fn add(a: i64, b: i64) -> i64 {
 #[tool]
 fn get_person_info(name: String) -> PyValue {
     PyValue::Dict(vec![
-        ("name".to_string(), PyValue::Str(name)),
-        ("age".to_string(), PyValue::Int(30)),
+        (PyValue::Str("name".to_string()), PyValue::Str(name)),
+        (PyValue::Str("age".to_string()), PyValue::Int(30)),
     ])
 }
 

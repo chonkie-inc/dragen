@@ -1970,9 +1970,9 @@ dependencies = [
 
 [[package]]
 name = "tanukie"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ae18c067bc5a761ed483890ee57b5e7edb164aba39c72fda33844708645835f"
+checksum = "67f4c97f8854d95ed0ad6ef2f11242d4e29e5a2aea15909bf362859e03e177c3"
 dependencies = [
  "async-trait",
  "futures",

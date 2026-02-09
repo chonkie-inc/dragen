@@ -6,10 +6,10 @@
 use ::dragen::{
     Agent as RustAgent, AgentConfig as RustAgentConfig, AgentEvent, Context as RustContext,
 };
-use ::littrs::{PyValue, ToolInfo as RustToolInfo};
+use ::littrs::{Limits, PyValue, Sandbox as RustSandbox, ToolInfo as RustToolInfo};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple};
 use pyo3::IntoPy;
 use tokio::runtime::Runtime;
 
@@ -29,13 +29,22 @@ fn pyvalue_to_py(py: Python<'_>, value: &PyValue) -> PyObject {
             let list: Vec<PyObject> = items.iter().map(|v| pyvalue_to_py(py, v)).collect();
             list.into_py(py)
         }
+        PyValue::Tuple(items) => {
+            let elements: Vec<PyObject> = items.iter().map(|v| pyvalue_to_py(py, v)).collect();
+            PyTuple::new(py, &elements).unwrap().into_py(py)
+        }
         PyValue::Dict(pairs) => {
             let dict = PyDict::new(py);
             for (k, v) in pairs {
-                dict.set_item(k, pyvalue_to_py(py, v)).unwrap();
+                dict.set_item(pyvalue_to_py(py, k), pyvalue_to_py(py, v)).unwrap();
             }
             dict.into_py(py)
         }
+        PyValue::Set(items) => {
+            let set = PySet::new(py, &items.iter().map(|v| pyvalue_to_py(py, v)).collect::<Vec<_>>()).unwrap();
+            set.into_py(py)
+        }
+        _ => py.None(),
     }
 }
 
@@ -54,11 +63,19 @@ fn py_to_pyvalue(obj: &Bound<'_, PyAny>) -> PyResult<PyValue> {
     } else if let Ok(list) = obj.downcast::<PyList>() {
         let items: PyResult<Vec<_>> = list.iter().map(|item| py_to_pyvalue(&item)).collect();
         Ok(PyValue::List(items?))
+    } else if let Ok(tuple) = obj.downcast::<PyTuple>() {
+        let items: PyResult<Vec<_>> = tuple.iter().map(|item| py_to_pyvalue(&item)).collect();
+        Ok(PyValue::Tuple(items?))
+    } else if let Ok(set) = obj.downcast::<PySet>() {
+        let items: PyResult<Vec<_>> = set.iter().map(|item| py_to_pyvalue(&item)).collect();
+        Ok(PyValue::Set(items?))
+    } else if let Ok(set) = obj.downcast::<PyFrozenSet>() {
+        let items: PyResult<Vec<_>> = set.iter().map(|item| py_to_pyvalue(&item)).collect();
+        Ok(PyValue::Set(items?))
     } else if let Ok(dict) = obj.downcast::<PyDict>() {
         let mut pairs = Vec::new();
         for (k, v) in dict.iter() {
-            let key: String = k.extract()?;
-            pairs.push((key, py_to_pyvalue(&v)?));
+            pairs.push((py_to_pyvalue(&k)?, py_to_pyvalue(&v)?));
         }
         Ok(PyValue::Dict(pairs))
     } else {
@@ -129,6 +146,14 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     }
 }
 
+/// Helper to create a PyValue error dict.
+fn pyvalue_error_dict(message: String) -> PyValue {
+    PyValue::Dict(vec![(
+        PyValue::Str("error".to_string()),
+        PyValue::Str(message),
+    )])
+}
+
 // ============================================================================
 // ToolInfo wrapper
 // ============================================================================
@@ -137,7 +162,7 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
 ///
 /// Example:
 ///     >>> info = ToolInfo("search", "Search the web")
-///     >>> info = info.arg_required("query", "str", "The search query")
+///     >>> info = info.arg("query", "str", "The search query")
 ///     >>> info = info.returns("list")
 #[pyclass]
 #[derive(Clone)]
@@ -167,14 +192,19 @@ impl ToolInfo {
     ///     description: Description of the argument
     fn arg_required(&self, name: &str, python_type: &str, description: &str) -> Self {
         Self {
-            inner: self.inner.clone().arg_required(name, python_type, description),
+            inner: self.inner.clone().arg(name, python_type, description),
         }
     }
 
     /// Add an optional argument.
+    ///
+    /// Args:
+    ///     name: Argument name
+    ///     python_type: Type hint (str, int, float, bool, list, dict, any)
+    ///     description: Description of the argument
     fn arg_optional(&self, name: &str, python_type: &str, description: &str) -> Self {
         Self {
-            inner: self.inner.clone().arg_optional(name, python_type, description),
+            inner: self.inner.clone().arg_opt(name, python_type, description),
         }
     }
 
@@ -246,6 +276,105 @@ impl AgentConfig {
     fn system(&self, system: &str) -> Self {
         Self {
             inner: self.inner.clone().system(system),
+        }
+    }
+}
+
+// ============================================================================
+// Sandbox wrapper
+// ============================================================================
+
+/// A configurable Python sandbox for executing code securely.
+///
+/// Create and configure a sandbox, then pass it to an Agent.
+///
+/// Example:
+///     >>> sandbox = Sandbox(builtins=True)
+///     >>> sandbox.limit(max_instructions=100000, max_recursion_depth=50)
+///     >>> sandbox.mount("data.json", "./data/input.json")
+///     >>> sandbox.set("items", [1, 2, 3])
+///     >>>
+///     >>> agent = Agent("gpt-4o", sandbox=sandbox)
+#[pyclass]
+#[derive(Clone)]
+struct Sandbox {
+    inner: RustSandbox,
+}
+
+#[pymethods]
+impl Sandbox {
+    /// Create a new sandbox.
+    ///
+    /// Args:
+    ///     builtins: If True, enable built-in modules (json, math, typing). Default: True.
+    #[new]
+    #[pyo3(signature = (builtins=true))]
+    fn new(builtins: bool) -> Self {
+        Self {
+            inner: if builtins {
+                RustSandbox::with_builtins()
+            } else {
+                RustSandbox::new()
+            },
+        }
+    }
+
+    /// Set resource limits for sandbox execution.
+    ///
+    /// Args:
+    ///     max_instructions: Maximum bytecode instructions per execution (None for unlimited)
+    ///     max_recursion_depth: Maximum call stack depth (None for unlimited)
+    #[pyo3(signature = (max_instructions=None, max_recursion_depth=None))]
+    fn limit(&mut self, max_instructions: Option<u64>, max_recursion_depth: Option<usize>) {
+        self.inner.limit(Limits {
+            max_instructions,
+            max_recursion_depth,
+        });
+    }
+
+    /// Mount a file into the sandbox's virtual filesystem.
+    ///
+    /// Args:
+    ///     virtual_path: The path visible to sandbox code
+    ///     host_path: The actual file path on the host
+    ///     writable: If True, sandbox code can write to this file. Default: False.
+    #[pyo3(signature = (virtual_path, host_path, writable=false))]
+    fn mount(&mut self, virtual_path: &str, host_path: &str, writable: bool) {
+        self.inner.mount(virtual_path, host_path, writable);
+    }
+
+    /// Set a variable in the sandbox's global scope.
+    ///
+    /// Args:
+    ///     name: Variable name
+    ///     value: The value to set
+    fn set(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let pyvalue = py_to_pyvalue(value)?;
+        self.inner.set(name, pyvalue);
+        Ok(())
+    }
+
+    /// Get the contents of all writable mounted files.
+    ///
+    /// Returns:
+    ///     Dict mapping virtual paths to file contents
+    fn files(&self, py: Python<'_>) -> PyObject {
+        let files = self.inner.files();
+        let dict = PyDict::new(py);
+        for (path, content) in files {
+            dict.set_item(path, content).unwrap();
+        }
+        dict.into_py(py)
+    }
+
+    /// Run Python code directly in the sandbox.
+    ///
+    /// Returns:
+    ///     The result of the last expression
+    fn run(&mut self, py: Python<'_>, code: &str) -> PyResult<PyObject> {
+        match self.inner.run(code) {
+            Ok(value) => Ok(pyvalue_to_py(py, &value)),
+            Err(e) => Err(PyRuntimeError::new_err(format!("{}", e))),
         }
     }
 }
@@ -383,8 +512,9 @@ impl Agent {
     ///     temperature: Temperature for LLM sampling (default: 0.7)
     ///     max_tokens: Maximum tokens for LLM response (default: 4096, None for unlimited)
     ///     system: Custom system description
+    ///     sandbox: Pre-configured Sandbox instance. If not provided, creates one with builtins.
     #[new]
-    #[pyo3(signature = (model, max_iterations=None, temperature=None, max_tokens=None, system=None, verbose=None))]
+    #[pyo3(signature = (model, max_iterations=None, temperature=None, max_tokens=None, system=None, verbose=None, sandbox=None))]
     fn new(
         model: &str,
         max_iterations: Option<usize>,
@@ -392,6 +522,7 @@ impl Agent {
         max_tokens: Option<u32>,
         system: Option<&str>,
         verbose: Option<bool>,
+        sandbox: Option<Sandbox>,
     ) -> PyResult<Self> {
         let runtime = Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
@@ -410,7 +541,10 @@ impl Agent {
             config = config.system(s);
         }
 
-        let mut agent = RustAgent::new(config);
+        let mut agent = match sandbox {
+            Some(sb) => RustAgent::with_sandbox(sb.inner, config),
+            None => RustAgent::new(config),
+        };
         if verbose.unwrap_or(false) {
             agent = agent.verbose(true);
         }
@@ -575,10 +709,7 @@ def make_decorator(agent, event_type):
                 let py_args: Vec<PyObject> = args.iter().map(|v| pyvalue_to_py(py, v)).collect();
                 match func.call1(py, (py_args,)) {
                     Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
-                    Err(e) => PyValue::Dict(vec![(
-                        "error".to_string(),
-                        PyValue::Str(format!("{}", e)),
-                    )]),
+                    Err(e) => pyvalue_error_dict(format!("{}", e)),
                 }
             })
         });
@@ -602,10 +733,7 @@ def make_decorator(agent, event_type):
                 let py_args: Vec<PyObject> = args.iter().map(|v| pyvalue_to_py(py, v)).collect();
                 match func.call1(py, (py_args,)) {
                     Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
-                    Err(e) => PyValue::Dict(vec![(
-                        "error".to_string(),
-                        PyValue::Str(format!("{}", e)),
-                    )]),
+                    Err(e) => pyvalue_error_dict(format!("{}", e)),
                 }
             })
         });
@@ -629,10 +757,7 @@ def make_decorator(agent, event_type):
                 let py_args: Vec<PyObject> = args.iter().map(|v| pyvalue_to_py(py, v)).collect();
                 match func.call1(py, (py_args,)) {
                     Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
-                    Err(e) => PyValue::Dict(vec![(
-                        "error".to_string(),
-                        PyValue::Str(format!("{}", e)),
-                    )]),
+                    Err(e) => pyvalue_error_dict(format!("{}", e)),
                 }
             })
         });
@@ -757,7 +882,7 @@ def make_decorator(agent, event_type):
 
     /// Get tool documentation for the registered tools.
     fn describe_tools(&self) -> String {
-        self.inner.sandbox().describe_tools()
+        self.inner.sandbox().describe()
     }
 
     /// Decorator to register a function as a tool.
@@ -1029,10 +1154,10 @@ fn register_tool_from_function(
         let has_default = !default.is(&inspect_empty);
 
         if has_default {
-            tool_info = tool_info.arg_optional(&param_name, &type_str, "");
+            tool_info = tool_info.arg_opt(&param_name, &type_str, "");
             param_defaults.push(Some(default.into_py(py)));
         } else {
-            tool_info = tool_info.arg_required(&param_name, &type_str, "");
+            tool_info = tool_info.arg(&param_name, &type_str, "");
             param_defaults.push(None);
         }
     }
@@ -1074,10 +1199,7 @@ fn register_tool_from_function(
             // Call with kwargs
             match func_clone.call(py, (), Some(&kwargs)) {
                 Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
-                Err(e) => PyValue::Dict(vec![(
-                    "error".to_string(),
-                    PyValue::Str(format!("{}", e)),
-                )]),
+                Err(e) => pyvalue_error_dict(format!("{}", e)),
             }
         })
     });
@@ -1172,10 +1294,10 @@ fn register_finish_from_function(
         let has_default = !default.is(&inspect_empty);
 
         if has_default {
-            tool_info = tool_info.arg_optional(&param_name, &type_str, "");
+            tool_info = tool_info.arg_opt(&param_name, &type_str, "");
             param_defaults.push(Some(default.into_py(py)));
         } else {
-            tool_info = tool_info.arg_required(&param_name, &type_str, "");
+            tool_info = tool_info.arg(&param_name, &type_str, "");
             param_defaults.push(None);
         }
     }
@@ -1205,10 +1327,7 @@ fn register_finish_from_function(
             // Call with kwargs - if it raises an exception, return error dict
             match func_clone.call(py, (), Some(&kwargs)) {
                 Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
-                Err(e) => PyValue::Dict(vec![(
-                    "error".to_string(),
-                    PyValue::Str(format!("{}", e)),
-                )]),
+                Err(e) => pyvalue_error_dict(format!("{}", e)),
             }
         })
     });
@@ -1226,17 +1345,20 @@ fn register_finish_from_function(
 /// in a secure sandbox.
 ///
 /// Example:
-///     >>> from dragen import Agent, AgentConfig, Context, ToolInfo
+///     >>> from dragen import Agent, AgentConfig, Context, Sandbox, ToolInfo
 ///     >>>
-///     >>> # Create an agent
-///     >>> agent = Agent(AgentConfig("gpt-4o").max_iterations(10))
+///     >>> # Create a configured sandbox
+///     >>> sandbox = Sandbox(builtins=True)
+///     >>> sandbox.limit(max_instructions=100000)
+///     >>>
+///     >>> # Create an agent with the sandbox
+///     >>> agent = Agent("gpt-4o", sandbox=sandbox)
 ///     >>>
 ///     >>> # Register a tool
-///     >>> def search(args):
-///     ...     query = args[0]
-///     ...     return {"results": [f"Found: {query}"]}
-///     >>>
-///     >>> agent.register_function("search", search)
+///     >>> @agent.tool
+///     ... def search(query: str) -> list:
+///     ...     """Search the web."""
+///     ...     return [{"result": query}]
 ///     >>>
 ///     >>> # Run a task
 ///     >>> result = agent.run("Search for Python tutorials")
@@ -1246,18 +1368,19 @@ fn register_finish_from_function(
 ///     >>> ctx = Context()
 ///     >>>
 ///     >>> # Planner writes to context
-///     >>> planner = Agent(AgentConfig("gpt-4o"))
+///     >>> planner = Agent("gpt-4o")
 ///     >>> planner = planner.to_context(ctx, "plan")
 ///     >>> planner.run("Create a research plan")
 ///     >>>
 ///     >>> # Executor reads from context
-///     >>> executor = Agent(AgentConfig("gpt-4o"))
+///     >>> executor = Agent("gpt-4o")
 ///     >>> executor = executor.from_context(ctx, "plan")
 ///     >>> executor.run("Execute the plan")
 #[pymodule]
 fn dragen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Agent>()?;
     m.add_class::<Context>()?;
+    m.add_class::<Sandbox>()?;
     m.add_class::<ToolInfo>()?;
     Ok(())
 }

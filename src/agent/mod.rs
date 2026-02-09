@@ -79,7 +79,34 @@ impl Clone for Agent {
 
 impl Agent {
     /// Create a new agent with the given configuration.
+    ///
+    /// Uses `Sandbox::with_builtins()` by default, which enables
+    /// `import json`, `import math`, and `import typing`.
     pub fn new(config: AgentConfig) -> Self {
+        Self::with_sandbox(Sandbox::with_builtins(), config)
+    }
+
+    /// Create a new agent with a pre-configured sandbox.
+    ///
+    /// This allows full control over the sandbox configuration:
+    /// resource limits, mounted files, custom modules, and builtins.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use littrs::{Sandbox, Limits};
+    /// use dragen::{Agent, AgentConfig};
+    ///
+    /// let mut sandbox = Sandbox::with_builtins();
+    /// sandbox.limit(Limits {
+    ///     max_instructions: Some(100_000),
+    ///     max_recursion_depth: Some(50),
+    /// });
+    /// sandbox.mount("input.json", "./data/input.json", false);
+    ///
+    /// let agent = Agent::with_sandbox(sandbox, AgentConfig::new("gpt-4o"));
+    /// ```
+    pub fn with_sandbox(sandbox: Sandbox, config: AgentConfig) -> Self {
         // Build thinking tag regex if configured
         let think_regex = config.thinking_tag.as_ref().map(|tag| {
             Regex::new(&format!(r"<{}>\s*([\s\S]*?)</{}>", tag, tag)).unwrap()
@@ -87,7 +114,7 @@ impl Agent {
 
         Self {
             client: Client::new(),
-            sandbox: Sandbox::new(),
+            sandbox,
             config,
             messages: Vec::new(),
             // Match either <code>...</code> or ```python...``` blocks
@@ -384,7 +411,7 @@ impl Agent {
 
     /// Register a tool with the agent's sandbox.
     pub fn register<T: littrs::Tool + 'static>(&mut self, tool: T) {
-        self.sandbox.register(tool);
+        self.sandbox.add(tool);
     }
 
     /// Register a tool with explicit info and callback.
@@ -406,7 +433,7 @@ impl Agent {
     /// // Now the agent's Python code can use `collected_items`
     /// ```
     pub fn set_variable(&mut self, name: impl Into<String>, value: impl Into<PyValue>) {
-        self.sandbox.set_variable(name, value);
+        self.sandbox.set(name, value);
     }
 
     /// Register a custom finish tool with specified arguments.
@@ -430,13 +457,13 @@ impl Agent {
 
     /// Register the default finish tool if no custom one exists.
     fn ensure_finish_tool(&mut self) {
-        let has_finish = self.sandbox.tool_infos().iter().any(|t| t.name == "finish");
+        let has_finish = self.sandbox.tools().iter().any(|t| t.name == "finish");
         if has_finish {
             return;
         }
 
         let finish_info = ToolInfo::new("finish", "Complete the task and return the final answer")
-            .arg_required("answer", "any", "The final answer to return")
+            .arg("answer", "any", "The final answer to return")
             .returns("any");
 
         let finish_answer_clone = self.finish_answer.clone();
@@ -487,7 +514,7 @@ impl Agent {
 
     /// Get the tool documentation for the system prompt.
     fn tool_docs(&self) -> String {
-        let docs = self.sandbox.describe_tools();
+        let docs = self.sandbox.describe();
         if docs.is_empty() {
             "No tools available.".to_string()
         } else {
@@ -571,15 +598,15 @@ impl Agent {
 
     /// Execute code in the sandbox and format the result.
     fn execute_code(&mut self, code: &str) -> String {
-        match self.sandbox.execute_with_output(code) {
+        match self.sandbox.capture(code) {
             Ok(output) => {
                 let mut parts = Vec::new();
 
-                if output.has_output() {
-                    parts.push(output.print_output());
+                if !output.output.is_empty() {
+                    parts.push(output.output.join("\n"));
                 }
 
-                let result_str = format_pyvalue(&output.result);
+                let result_str = format_pyvalue(&output.value);
                 if result_str != "None" {
                     parts.push(format!("=> {}", result_str));
                 }

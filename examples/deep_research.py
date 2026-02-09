@@ -611,7 +611,7 @@ def run_planner_agent(topic: str, sources: list, ctx: Context) -> dict:
         sources_text += f"[{i+1}] {s.get('title', 'Untitled')}\n"
         sources_text += f"    URL: {s.get('url', '')}\n"
         sources_text += f"    Relevance: {s.get('relevance', '')}\n"
-        sources_text += f"    Content: {s.get('snippet', '')[:500]}...\n\n"
+        sources_text += f"    Content: {s.get('snippet', '')[:10000]}...\n\n"
 
     ctx.set("sources", sources_text)
     ctx.set("sources_list", sources)
@@ -721,7 +721,7 @@ def run_writers_parallel(sections: list, all_sources: list) -> list:
 
     # Create writer agent - using Sonnet for higher quality writing
     agent = Agent(
-        "claude-sonnet-4-20250514",
+        "claude-sonnet-4-5-20250929",
         max_iterations=8,
         system=WRITER_PROMPT.replace("{datetime_xml}", get_datetime_xml())
     )

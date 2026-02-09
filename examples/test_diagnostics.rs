@@ -9,8 +9,8 @@ fn main() {
 
     // Register a tool with type info
     let search_info = ToolInfo::new("search", "Search the web for information")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("limit", "int", "Number of results (1-10)")
+        .arg("query", "str", "The search query")
+        .arg_opt("limit", "int", "Number of results (1-10)")
         .returns("list");
 
     sandbox.register_tool(search_info, |args| {
@@ -27,7 +27,7 @@ fn main() {
     // Test 1: Correct usage
     println!("Test 1: Correct usage");
     println!("─────────────────────");
-    let result = sandbox.execute(r#"search("AI agents", 5)"#);
+    let result = sandbox.run(r#"search("AI agents", 5)"#);
     match result {
         Ok(_) => println!("✅ Success\n"),
         Err(e) => println!("❌ Error: {}\n", e),
@@ -36,7 +36,7 @@ fn main() {
     // Test 2: Wrong type for first argument (passing int instead of str)
     println!("Test 2: Wrong type for query (int instead of str)");
     println!("─────────────────────────────────────────────────");
-    let result = sandbox.execute(r#"search(12345, 5)"#);
+    let result = sandbox.run(r#"search(12345, 5)"#);
     match result {
         Ok(_) => println!("✅ Success\n"),
         Err(e) => println!("{}\n", e),
@@ -45,7 +45,7 @@ fn main() {
     // Test 3: Wrong type for second argument (passing str instead of int)
     println!("Test 3: Wrong type for limit (str instead of int)");
     println!("─────────────────────────────────────────────────");
-    let result = sandbox.execute(r#"search("AI agents", "five")"#);
+    let result = sandbox.run(r#"search("AI agents", "five")"#);
     match result {
         Ok(_) => println!("✅ Success\n"),
         Err(e) => println!("{}\n", e),
@@ -54,7 +54,7 @@ fn main() {
     // Test 4: Unexpected keyword argument
     println!("Test 4: Unexpected keyword argument");
     println!("────────────────────────────────────");
-    let result = sandbox.execute(r#"search("AI agents", timeout=30)"#);
+    let result = sandbox.run(r#"search("AI agents", timeout=30)"#);
     match result {
         Ok(_) => println!("✅ Success\n"),
         Err(e) => println!("{}\n", e),

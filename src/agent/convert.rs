@@ -14,13 +14,22 @@ pub fn format_pyvalue(value: &PyValue) -> String {
             let formatted: Vec<String> = items.iter().map(format_pyvalue).collect();
             format!("[{}]", formatted.join(", "))
         }
+        PyValue::Tuple(items) => {
+            let formatted: Vec<String> = items.iter().map(format_pyvalue).collect();
+            format!("({})", formatted.join(", "))
+        }
         PyValue::Dict(pairs) => {
             let formatted: Vec<String> = pairs
                 .iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, format_pyvalue(v)))
+                .map(|(k, v)| format!("{}: {}", format_pyvalue(k), format_pyvalue(v)))
                 .collect();
             format!("{{{}}}", formatted.join(", "))
         }
+        PyValue::Set(items) => {
+            let formatted: Vec<String> = items.iter().map(format_pyvalue).collect();
+            format!("{{{}}}", formatted.join(", "))
+        }
+        _ => format!("{}", value),
     }
 }
 
@@ -37,13 +46,34 @@ pub fn pyvalue_to_string(value: &PyValue) -> String {
             let formatted: Vec<String> = items.iter().map(pyvalue_to_string).collect();
             format!("[{}]", formatted.join(", "))
         }
+        PyValue::Tuple(items) => {
+            let formatted: Vec<String> = items.iter().map(pyvalue_to_string).collect();
+            format!("({})", formatted.join(", "))
+        }
         PyValue::Dict(pairs) => {
             let formatted: Vec<String> = pairs
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, pyvalue_to_string(v)))
+                .map(|(k, v)| format!("{}: {}", pyvalue_to_string(k), pyvalue_to_string(v)))
                 .collect();
             formatted.join("\n")
         }
+        PyValue::Set(items) => {
+            let formatted: Vec<String> = items.iter().map(pyvalue_to_string).collect();
+            format!("{{{}}}", formatted.join(", "))
+        }
+        _ => format!("{}", value),
+    }
+}
+
+/// Extract a string key from a PyValue (for JSON dict keys).
+fn pyvalue_key_to_string(key: &PyValue) -> String {
+    match key {
+        PyValue::Str(s) => s.clone(),
+        PyValue::Int(i) => i.to_string(),
+        PyValue::Float(f) => f.to_string(),
+        PyValue::Bool(b) => b.to_string(),
+        PyValue::None => "null".to_string(),
+        other => format!("{}", other),
     }
 }
 
@@ -60,13 +90,20 @@ pub fn pyvalue_to_json(value: &PyValue) -> serde_json::Value {
         PyValue::List(items) => {
             serde_json::Value::Array(items.iter().map(pyvalue_to_json).collect())
         }
+        PyValue::Tuple(items) => {
+            serde_json::Value::Array(items.iter().map(pyvalue_to_json).collect())
+        }
         PyValue::Dict(pairs) => {
             let map: serde_json::Map<String, serde_json::Value> = pairs
                 .iter()
-                .map(|(k, v)| (k.clone(), pyvalue_to_json(v)))
+                .map(|(k, v)| (pyvalue_key_to_string(k), pyvalue_to_json(v)))
                 .collect();
             serde_json::Value::Object(map)
         }
+        PyValue::Set(items) => {
+            serde_json::Value::Array(items.iter().map(pyvalue_to_json).collect())
+        }
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -88,7 +125,7 @@ pub fn json_to_pyvalue(value: &serde_json::Value) -> PyValue {
         serde_json::Value::Array(arr) => PyValue::List(arr.iter().map(json_to_pyvalue).collect()),
         serde_json::Value::Object(map) => PyValue::Dict(
             map.iter()
-                .map(|(k, v)| (k.clone(), json_to_pyvalue(v)))
+                .map(|(k, v)| (PyValue::Str(k.clone()), json_to_pyvalue(v)))
                 .collect(),
         ),
     }

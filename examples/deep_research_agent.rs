@@ -73,10 +73,10 @@ fn search_web(query: String, num_results: i64) -> PyValue {
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
                             (
-                                "snippet".to_string(),
+                                PyValue::Str("snippet".to_string()),
                                 PyValue::Str(r.text.unwrap_or_default()),
                             ),
                         ])
@@ -296,8 +296,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register search tool
     let search_info = ToolInfo::new("search", "Search the web for information")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("num_results", "int", "Number of results (1-10, default 5)")
+        .arg("query", "str", "The search query")
+        .arg_opt("num_results", "int", "Number of results (1-10, default 5)")
         .returns("list");
 
     agent.register_tool(search_info, |args| {
@@ -312,7 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register a notes tool for the agent to track its research
     let notes_info = ToolInfo::new("note", "Save a research note for later reference")
-        .arg_required("content", "str", "The note content")
+        .arg("content", "str", "The note content")
         .returns("str");
 
     let notes: std::sync::Arc<std::sync::Mutex<Vec<String>>> =

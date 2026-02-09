@@ -38,17 +38,17 @@ fn get_person_info(name: String) -> PyValue {
     // Simulated database lookup
     let info = match name.to_lowercase().as_str() {
         "alice" => vec![
-            ("name".to_string(), PyValue::Str("Alice".to_string())),
-            ("age".to_string(), PyValue::Int(30)),
-            ("city".to_string(), PyValue::Str("New York".to_string())),
+            (PyValue::Str("name".to_string()), PyValue::Str("Alice".to_string())),
+            (PyValue::Str("age".to_string()), PyValue::Int(30)),
+            (PyValue::Str("city".to_string()), PyValue::Str("New York".to_string())),
         ],
         "bob" => vec![
-            ("name".to_string(), PyValue::Str("Bob".to_string())),
-            ("age".to_string(), PyValue::Int(25)),
-            ("city".to_string(), PyValue::Str("San Francisco".to_string())),
+            (PyValue::Str("name".to_string()), PyValue::Str("Bob".to_string())),
+            (PyValue::Str("age".to_string()), PyValue::Int(25)),
+            (PyValue::Str("city".to_string()), PyValue::Str("San Francisco".to_string())),
         ],
         _ => vec![
-            ("error".to_string(), PyValue::Str(format!("Person '{}' not found", name))),
+            (PyValue::Str("error".to_string()), PyValue::Str(format!("Person '{}' not found", name))),
         ],
     };
     PyValue::Dict(info)
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.register(get_person_info::Tool);
 
     println!("\n--- Agent Tools ---");
-    println!("{}", agent.sandbox().describe_tools());
+    println!("{}", agent.sandbox().describe());
 
     // Run a task
     let task = "What is (15 + 27) * 3? Also, look up information about Alice and tell me her age.";

@@ -7,10 +7,10 @@ license = "Apache-2.0"
 
 [dependencies]
 # LLM client
-tanukie = "0.1.1"
+tanukie = "0.1.2"
 
 # Python sandbox
-littrs = { version = "0.3.1", features = ["macros"] }
+littrs = { version = "0.6.0", features = ["macros"] }
 
 # Async runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }

@@ -63,10 +63,10 @@ fn search_web(query: String, num_results: i64) -> PyValue {
                     .into_iter()
                     .map(|r| {
                         PyValue::Dict(vec![
-                            ("title".to_string(), PyValue::Str(r.title)),
-                            ("url".to_string(), PyValue::Str(r.url)),
+                            (PyValue::Str("title".to_string()), PyValue::Str(r.title)),
+                            (PyValue::Str("url".to_string()), PyValue::Str(r.url)),
                             (
-                                "text".to_string(),
+                                PyValue::Str("text".to_string()),
                                 PyValue::Str(
                                     r.text.unwrap_or_default().chars().take(500).collect(),
                                 ),
@@ -104,8 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register the search tool with metadata
     let search_info = ToolInfo::new("search", "Search the web using Exa")
-        .arg_required("query", "str", "The search query")
-        .arg_optional("num_results", "int", "Number of results (1-10, default 3)")
+        .arg("query", "str", "The search query")
+        .arg_opt("num_results", "int", "Number of results (1-10, default 3)")
         .returns("list");
 
     agent.register_tool(search_info, |args| {
