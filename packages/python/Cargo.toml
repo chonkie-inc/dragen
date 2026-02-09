@@ -1,6 +1,6 @@
 [package]
 name = "dragen-python"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Python bindings for dragen - CodeAct-style AI agent framework"
 license = "Apache-2.0"
