@@ -59,7 +59,7 @@ sandbox.module("config", |m| {
     m.function("get_flag", |_args| littrs::PyValue::Bool(true));
 });
 
-let agent = Agent::with_sandbox(sandbox, AgentConfig::new("gpt-4o"));
+let agent = Agent::with_sandbox(sandbox, AgentConfig::new("moonshotai/kimi-k2.5"));
 ```
 
 ### Python
@@ -72,7 +72,7 @@ sandbox.limit(max_instructions=100_000, max_recursion_depth=50)
 sandbox.mount("input.json", "./data/input.json")
 sandbox.mount("output.txt", "./results/output.txt", writable=True)
 
-agent = dragen.Agent("gpt-4o", sandbox=sandbox)
+agent = dragen.Agent("moonshotai/kimi-k2.5", sandbox=sandbox)
 ```
 
 ### Sandbox capabilities
@@ -184,7 +184,7 @@ let schema = serde_json::json!({
     }
 });
 
-let mut agent = Agent::with_model("gpt-4o").schema(schema);
+let mut agent = Agent::with_model("moonshotai/kimi-k2.5").schema(schema);
 let result: Analysis = agent.run("Analyze: 'This product is amazing!'").await?;
 ```
 
@@ -267,12 +267,12 @@ use dragen::{Agent, AgentConfig, Context};
 let ctx = Context::new();
 
 // Planner writes output to context
-let mut planner = Agent::new(AgentConfig::new("gpt-4o"))
+let mut planner = Agent::new(AgentConfig::new("moonshotai/kimi-k2.5"))
     .to_context(&ctx, "plan");
 planner.run::<PlanOutput>(&task).await?;
 
 // Executor reads from context (auto-injected into prompt)
-let mut executor = Agent::new(AgentConfig::new("gpt-4o"))
+let mut executor = Agent::new(AgentConfig::new("moonshotai/kimi-k2.5"))
     .from_context(&ctx, "plan");
 executor.run::<String>("Execute the plan").await?;
 ```
@@ -318,7 +318,7 @@ Hook into every step of the agent loop for logging, debugging, or custom control
 ### Rust callbacks
 
 ```rust
-let agent = Agent::with_model("gpt-4o")
+let agent = Agent::with_model("moonshotai/kimi-k2.5")
     .on_code_generated(|e| {
         if let AgentEvent::CodeGenerated { code } = e {
             println!("Code: {}", code);
@@ -341,7 +341,7 @@ let agent = Agent::with_model("gpt-4o")
 Built-in logging to stderr:
 
 ```rust
-let agent = Agent::with_model("gpt-4o").verbose(true);
+let agent = Agent::with_model("moonshotai/kimi-k2.5").verbose(true);
 ```
 
 ### Python callbacks
@@ -361,7 +361,7 @@ def on_finish(event):
 Extract structured thinking from custom XML tags:
 
 ```rust
-let config = AgentConfig::new("gpt-4o")
+let config = AgentConfig::new("moonshotai/kimi-k2.5")
     .thinking_tag("intent");
 
 // The agent will extract content from <intent>...</intent> blocks
@@ -373,7 +373,7 @@ let config = AgentConfig::new("gpt-4o")
 `AgentConfig` uses a builder pattern:
 
 ```rust
-let config = AgentConfig::new("gpt-4o")
+let config = AgentConfig::new("moonshotai/kimi-k2.5")
     .max_iterations(10)        // Max code execution iterations (default: 10)
     .temperature(0.7)          // LLM sampling temperature
     .max_tokens(4096)          // Max tokens per LLM response
@@ -386,7 +386,7 @@ let config = AgentConfig::new("gpt-4o")
 
 ```python
 agent = dragen.Agent(
-    "gpt-4o",
+    "moonshotai/kimi-k2.5",
     max_iterations=10,
     temperature=0.7,
     max_tokens=4096,
