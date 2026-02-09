@@ -30,4 +30,5 @@ Repository = "https://github.com/chonkie-inc/dragen"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "dragen"
+module-name = "dragen.dragen"
+python-source = "python"

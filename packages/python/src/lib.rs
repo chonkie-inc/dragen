@@ -376,6 +376,124 @@ impl Sandbox {
             Err(e) => Err(PyRuntimeError::new_err(format!("{}", e))),
         }
     }
+
+    /// Run Python code and capture print output.
+    ///
+    /// Returns:
+    ///     A tuple of (result, list of printed lines)
+    ///
+    /// Example:
+    ///     >>> result, printed = sandbox.capture("for i in range(3): print(i)\n'done'")
+    ///     >>> printed
+    ///     ['0', '1', '2']
+    ///     >>> result
+    ///     'done'
+    fn capture(&mut self, py: Python<'_>, code: &str) -> PyResult<(PyObject, Vec<String>)> {
+        match self.inner.capture(code) {
+            Ok(output) => Ok((pyvalue_to_py(py, &output.value), output.output)),
+            Err(e) => Err(PyRuntimeError::new_err(format!("{}", e))),
+        }
+    }
+
+    /// Register a Python callable as a tool in the sandbox.
+    ///
+    /// The callable receives a list of positional arguments and should return a value.
+    ///
+    /// Args:
+    ///     name: The function name in the sandbox
+    ///     func: A Python callable that takes a list of arguments
+    ///
+    /// Example:
+    ///     >>> def add(args):
+    ///     ...     return args[0] + args[1]
+    ///     >>> sandbox.register("add", add)
+    ///     >>> sandbox.run("add(1, 2)")
+    ///     3
+    fn register(&mut self, py: Python<'_>, name: &str, func: PyObject) -> PyResult<()> {
+        if !func.bind(py).is_callable() {
+            return Err(PyTypeError::new_err("func must be callable"));
+        }
+
+        let func = func.clone_ref(py);
+        self.inner.register_fn(name, move |args: Vec<PyValue>| {
+            Python::with_gil(|py| {
+                let py_args: Vec<PyObject> = args.iter().map(|v| pyvalue_to_py(py, v)).collect();
+                match func.call1(py, (py_args,)) {
+                    Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
+                    Err(e) => pyvalue_error_dict(format!("{}", e)),
+                }
+            })
+        });
+
+        Ok(())
+    }
+
+    /// Register a module that can be imported from sandbox code.
+    ///
+    /// Args:
+    ///     name: The module name (used in `import name`)
+    ///     attrs: A dict of attribute names to values or callables
+    ///
+    /// Example:
+    ///     >>> sandbox.module("mymod", {"VERSION": "1.0", "double": lambda args: args[0] * 2})
+    ///     >>> sandbox.run("import mymod; mymod.double(21)")
+    ///     42
+    fn module(&mut self, _py: Python<'_>, name: &str, attrs: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut constants: Vec<(String, PyValue)> = Vec::new();
+        let mut functions: Vec<(String, PyObject)> = Vec::new();
+
+        for (k, v) in attrs.iter() {
+            let attr_name = k.extract::<String>()?;
+            if v.is_callable() {
+                functions.push((attr_name, v.unbind()));
+            } else {
+                constants.push((attr_name, py_to_pyvalue(&v)?));
+            }
+        }
+
+        self.inner.module(name, |m| {
+            for (attr_name, value) in constants {
+                m.constant(&attr_name, value);
+            }
+            for (attr_name, func) in functions {
+                m.function(&attr_name, move |args: Vec<PyValue>| {
+                    Python::with_gil(|py| {
+                        let py_args: Vec<PyObject> =
+                            args.iter().map(|v| pyvalue_to_py(py, v)).collect();
+                        match func.call1(py, (py_args,)) {
+                            Ok(result) => py_to_pyvalue(result.bind(py)).unwrap_or(PyValue::None),
+                            Err(e) => pyvalue_error_dict(format!("{}", e)),
+                        }
+                    })
+                });
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Get tool documentation for all registered tools.
+    ///
+    /// Returns Python-style function signatures and docstrings,
+    /// suitable for embedding in an LLM system prompt.
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
+    /// Allow sandbox["x"] = val as shorthand for sandbox.set("x", val).
+    fn __setitem__(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let pyvalue = py_to_pyvalue(value)?;
+        self.inner.set(name, pyvalue);
+        Ok(())
+    }
+
+    /// Allow sandbox(code) as shorthand for sandbox.run(code).
+    fn __call__(&mut self, py: Python<'_>, code: &str) -> PyResult<PyObject> {
+        match self.inner.run(code) {
+            Ok(value) => Ok(pyvalue_to_py(py, &value)),
+            Err(e) => Err(PyRuntimeError::new_err(format!("{}", e))),
+        }
+    }
 }
 
 // ============================================================================
@@ -515,13 +633,14 @@ impl Agent {
     #[new]
     #[pyo3(signature = (model, max_iterations=None, temperature=None, max_tokens=None, system=None, verbose=None, sandbox=None))]
     fn new(
+        _py: Python<'_>,
         model: &str,
         max_iterations: Option<usize>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         system: Option<&str>,
         verbose: Option<bool>,
-        sandbox: Option<Sandbox>,
+        sandbox: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let runtime = Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
@@ -540,8 +659,26 @@ impl Agent {
             config = config.system(s);
         }
 
+        // Accept either a Rust Sandbox directly or a Python wrapper with _inner
         let mut agent = match sandbox {
-            Some(sb) => RustAgent::with_sandbox(sb.inner, config),
+            Some(sb) => {
+                let rust_sandbox = if let Ok(s) = sb.extract::<Sandbox>() {
+                    // Direct Rust Sandbox
+                    s.inner
+                } else if let Ok(inner) = sb.getattr("_inner") {
+                    // Python wrapper Sandbox (has _inner attribute)
+                    inner.extract::<Sandbox>()
+                        .map_err(|_| PyTypeError::new_err(
+                            "sandbox._inner must be a Rust Sandbox instance"
+                        ))?
+                        .inner
+                } else {
+                    return Err(PyTypeError::new_err(
+                        "sandbox must be a Sandbox instance"
+                    ));
+                };
+                RustAgent::with_sandbox(rust_sandbox, config)
+            }
             None => RustAgent::new(config),
         };
         if verbose.unwrap_or(false) {
