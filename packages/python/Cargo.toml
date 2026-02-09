@@ -17,7 +17,7 @@ dragen = { path = "../.." }
 littrs = { version = "0.6.0", features = ["macros"] }
 
 # Python bindings
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.24", features = ["extension-module"] }
 
 # Async runtime for blocking on async code
 tokio = { version = "1.48", features = ["rt-multi-thread"] }

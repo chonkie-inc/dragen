@@ -10,7 +10,6 @@ use ::littrs::{Limits, PyValue, Sandbox as RustSandbox, ToolInfo as RustToolInfo
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple};
-use pyo3::IntoPy;
 use tokio::runtime::Runtime;
 
 // ============================================================================
@@ -21,28 +20,28 @@ use tokio::runtime::Runtime;
 fn pyvalue_to_py(py: Python<'_>, value: &PyValue) -> PyObject {
     match value {
         PyValue::None => py.None(),
-        PyValue::Bool(b) => b.into_py(py),
-        PyValue::Int(i) => i.into_py(py),
-        PyValue::Float(f) => f.into_py(py),
-        PyValue::Str(s) => s.into_py(py),
+        PyValue::Bool(b) => PyBool::new(py, *b).to_owned().into_any().unbind(),
+        PyValue::Int(i) => i.into_pyobject(py).unwrap().into_any().unbind(),
+        PyValue::Float(f) => f.into_pyobject(py).unwrap().into_any().unbind(),
+        PyValue::Str(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
         PyValue::List(items) => {
             let list: Vec<PyObject> = items.iter().map(|v| pyvalue_to_py(py, v)).collect();
-            list.into_py(py)
+            list.into_pyobject(py).unwrap().into_any().unbind()
         }
         PyValue::Tuple(items) => {
             let elements: Vec<PyObject> = items.iter().map(|v| pyvalue_to_py(py, v)).collect();
-            PyTuple::new(py, &elements).unwrap().into_py(py)
+            PyTuple::new(py, &elements).unwrap().into_pyobject(py).unwrap().into_any().unbind()
         }
         PyValue::Dict(pairs) => {
             let dict = PyDict::new(py);
             for (k, v) in pairs {
                 dict.set_item(pyvalue_to_py(py, k), pyvalue_to_py(py, v)).unwrap();
             }
-            dict.into_py(py)
+            dict.into_pyobject(py).unwrap().into_any().unbind()
         }
         PyValue::Set(items) => {
             let set = PySet::new(py, &items.iter().map(|v| pyvalue_to_py(py, v)).collect::<Vec<_>>()).unwrap();
-            set.into_py(py)
+            set.into_pyobject(py).unwrap().into_any().unbind()
         }
         _ => py.None(),
     }
@@ -90,27 +89,27 @@ fn py_to_pyvalue(obj: &Bound<'_, PyAny>) -> PyResult<PyValue> {
 fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyObject {
     match value {
         serde_json::Value::Null => py.None(),
-        serde_json::Value::Bool(b) => b.into_py(py),
+        serde_json::Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any().unbind(),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                i.into_py(py)
+                i.into_pyobject(py).unwrap().into_any().unbind()
             } else if let Some(f) = n.as_f64() {
-                f.into_py(py)
+                f.into_pyobject(py).unwrap().into_any().unbind()
             } else {
                 py.None()
             }
         }
-        serde_json::Value::String(s) => s.into_py(py),
+        serde_json::Value::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
         serde_json::Value::Array(arr) => {
             let list: Vec<PyObject> = arr.iter().map(|v| json_to_py(py, v)).collect();
-            list.into_py(py)
+            list.into_pyobject(py).unwrap().into_any().unbind()
         }
         serde_json::Value::Object(map) => {
             let dict = PyDict::new(py);
             for (k, v) in map {
                 dict.set_item(k, json_to_py(py, v)).unwrap();
             }
-            dict.into_py(py)
+            dict.into_pyobject(py).unwrap().into_any().unbind()
         }
     }
 }
@@ -364,7 +363,7 @@ impl Sandbox {
         for (path, content) in files {
             dict.set_item(path, content).unwrap();
         }
-        dict.into_py(py)
+        dict.into_pyobject(py).unwrap().into_any().unbind()
     }
 
     /// Run Python code directly in the sandbox.
@@ -580,7 +579,7 @@ impl Agent {
     ///     >>> result = agent.run("Search for Python tutorials")
     #[pyo3(signature = (event_type))]
     fn on(
-        mut slf: PyRefMut<'_, Self>,
+        slf: PyRefMut<'_, Self>,
         py: Python<'_>,
         event_type: String,
     ) -> PyResult<PyObject> {
@@ -602,7 +601,7 @@ def make_decorator(agent, event_type):
 
         let make_decorator = decorator.getattr("make_decorator")?;
         let result = make_decorator.call1((slf.into_pyobject(py)?, event_type_clone))?;
-        Ok(result.into_py(py))
+        Ok(result.into_pyobject(py).unwrap().into_any().unbind())
     }
 
     /// Internal method to register a callback (called by decorator).
@@ -953,7 +952,7 @@ def make_decorator(agent, name, is_finish):
 
                 let make_decorator = decorator.getattr("make_decorator")?;
                 let result = make_decorator.call1((slf.into_pyobject(py)?, name_clone, finish))?;
-                Ok(result.into_py(py))
+                Ok(result.into_pyobject(py).unwrap().into_any().unbind())
             }
         }
     }
@@ -1035,12 +1034,12 @@ def make_decorator(agent, name, is_finish):
                 Err(e) => {
                     let dict = PyDict::new(py);
                     dict.set_item("error", format!("{}", e)).unwrap();
-                    dict.into_py(py)
+                    dict.into_pyobject(py).unwrap().into_any().unbind()
                 }
             })
             .collect();
 
-        Ok(py_results.into_py(py))
+        Ok(py_results.into_pyobject(py).unwrap().into_any().unbind())
     }
 
     /// Set a JSON Schema for validating finish() output.
@@ -1116,7 +1115,7 @@ fn register_tool_from_function(
 
     // Iterate over parameters
     let items = parameters.call_method0("items")?;
-    for item in items.iter()? {
+    for item in items.try_iter()? {
         let item = item?;
         let tuple = item.downcast::<pyo3::types::PyTuple>()?;
         let param_name: String = tuple.get_item(0)?.extract()?;
@@ -1155,7 +1154,7 @@ fn register_tool_from_function(
 
         if has_default {
             tool_info = tool_info.arg_opt(&param_name, &type_str, "");
-            param_defaults.push(Some(default.into_py(py)));
+            param_defaults.push(Some(default.into_pyobject(py).unwrap().into_any().unbind()));
         } else {
             tool_info = tool_info.arg(&param_name, &type_str, "");
             param_defaults.push(None);
@@ -1258,7 +1257,7 @@ fn register_finish_from_function(
 
     // Iterate over parameters
     let items = parameters.call_method0("items")?;
-    for item in items.iter()? {
+    for item in items.try_iter()? {
         let item = item?;
         let tuple = item.downcast::<pyo3::types::PyTuple>()?;
         let param_name: String = tuple.get_item(0)?.extract()?;
@@ -1295,7 +1294,7 @@ fn register_finish_from_function(
 
         if has_default {
             tool_info = tool_info.arg_opt(&param_name, &type_str, "");
-            param_defaults.push(Some(default.into_py(py)));
+            param_defaults.push(Some(default.into_pyobject(py).unwrap().into_any().unbind()));
         } else {
             tool_info = tool_info.arg(&param_name, &type_str, "");
             param_defaults.push(None);
