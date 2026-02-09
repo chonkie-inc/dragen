@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 # LLM client
-tanukie = "0.1.2"
+tanukie = "0.2.0"
 
 # Python sandbox
 littrs = { version = "0.6.0", features = ["macros"] }
