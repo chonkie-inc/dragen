@@ -30,7 +30,7 @@ pip install dragen
 ```python
 import dragen
 
-agent = dragen.Agent("gpt-4o")
+agent = dragen.Agent("moonshotai/kimi-k2.5")
 
 @agent.tool
 def search(query: str) -> str:
@@ -55,7 +55,7 @@ class Analysis(BaseModel):
     sentiment: str  # positive, negative, neutral
     confidence: float
 
-agent = dragen.Agent("gpt-4o")
+agent = dragen.Agent("moonshotai/kimi-k2.5")
 result = agent.run(
     "Analyze the sentiment of: 'This product is amazing!'",
     schema=Analysis.model_json_schema()
@@ -73,11 +73,11 @@ from dragen import Agent, Context
 ctx = Context()
 
 # Planner researches and writes a plan
-planner = Agent("gpt-4o").to_context(ctx, "plan")
+planner = Agent("moonshotai/kimi-k2.5").to_context(ctx, "plan")
 planner.run("Create a research plan for: quantum computing trends")
 
 # Writer reads the plan and produces content
-writer = Agent("gpt-4o").from_context(ctx, "plan")
+writer = Agent("moonshotai/kimi-k2.5").from_context(ctx, "plan")
 result = writer.run("Write a report based on the research plan")
 ```
 
@@ -93,7 +93,7 @@ def summarize(text: str) -> str:
     """Summarize text using an external API."""
     return call_summary_api(text)
 
-agent = dragen.Agent("gpt-4o", sandbox=sandbox)
+agent = dragen.Agent("moonshotai/kimi-k2.5", sandbox=sandbox)
 result = agent.run("Read data.csv and summarize its contents")
 ```
 
@@ -105,7 +105,7 @@ Process inputs far beyond the context window — the long input lives in the san
 sandbox = dragen.Sandbox(builtins=True)
 sandbox["document"] = very_long_text  # e.g. 500K tokens
 
-agent = dragen.Agent("gpt-4o", max_iterations=20, sandbox=sandbox)
+agent = dragen.Agent("moonshotai/kimi-k2.5", max_iterations=20, sandbox=sandbox)
 result = agent.run("""
 The variable `document` contains a very long research paper.
 Extract all key findings, then synthesize them into a structured summary.
@@ -117,7 +117,7 @@ You can slice `document` with Python string indexing to read it in parts.
 
 ```python
 agent = dragen.Agent(
-    "gpt-4o",
+    "moonshotai/kimi-k2.5",
     max_iterations=10,
     temperature=0.7,
     max_tokens=4096,
@@ -128,7 +128,7 @@ agent = dragen.Agent(
 ## Event Callbacks
 
 ```python
-agent = dragen.Agent("gpt-4o")
+agent = dragen.Agent("moonshotai/kimi-k2.5")
 
 @agent.on_code
 def on_code(code):
