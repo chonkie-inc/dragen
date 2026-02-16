@@ -1,6 +1,6 @@
 [package]
 name = "dragen-python"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Python bindings for dragen - CodeAct-style AI agent framework"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 dragen = { path = "../.." }
 
 # Python sandbox (for PyValue and ToolInfo)
-littrs = { version = "0.6.0", features = ["macros"] }
+littrs = { version = "0.6.1", features = ["macros"] }
 
 # Python bindings
 pyo3 = { version = "0.24", features = ["extension-module"] }

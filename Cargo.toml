@@ -1,6 +1,6 @@
 [package]
 name = "dragen"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "CodeAct-style agent framework using Littrs sandbox"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ license = "Apache-2.0"
 tanukie = "0.2.0"
 
 # Python sandbox
-littrs = { version = "0.6.0", features = ["macros"] }
+littrs = { version = "0.6.1", features = ["macros"] }
 
 # Async runtime
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }
