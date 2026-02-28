@@ -65,10 +65,10 @@ impl AgentCallbacks {
     /// Emit an event to the appropriate callback(s)
     pub fn emit(&self, event: &AgentEvent) {
         // Capture event if enabled (used by Python bindings)
-        if let Some(ref events) = self.captured_events {
-            if let Ok(mut events) = events.lock() {
-                events.push(event.clone());
-            }
+        if let Some(ref events) = self.captured_events
+            && let Ok(mut events) = events.lock()
+        {
+            events.push(event.clone());
         }
 
         // Call specific callback

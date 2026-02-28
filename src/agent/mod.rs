@@ -267,10 +267,10 @@ impl Agent {
     /// Take captured events (used internally by Python bindings).
     #[doc(hidden)]
     pub fn take_events(&mut self) -> Vec<AgentEvent> {
-        if let Some(ref events) = self.callbacks.captured_events {
-            if let Ok(mut events) = events.lock() {
-                return std::mem::take(&mut *events);
-            }
+        if let Some(ref events) = self.callbacks.captured_events
+            && let Ok(mut events) = events.lock()
+        {
+            return std::mem::take(&mut *events);
         }
         Vec::new()
     }
@@ -623,9 +623,11 @@ impl Agent {
 
     /// Call the LLM with current messages.
     async fn call_llm(&self) -> Result<tanukie::Response> {
-        let mut options = tanukie::GenerateOptions::default();
-        options.temperature = self.config.temperature;
-        options.max_tokens = self.config.max_tokens;
+        let options = tanukie::GenerateOptions {
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+            ..Default::default()
+        };
 
         let response = self
             .client
@@ -817,20 +819,55 @@ impl Agent {
 
                 // Check if finish() was called
                 if output.contains(FINISH_MARKER) {
-                    if let Ok(fa) = self.finish_answer.lock() {
-                        if let Some(value) = fa.as_ref() {
-                            let json = pyvalue_to_json(value);
+                    if let Ok(fa) = self.finish_answer.lock()
+                        && let Some(value) = fa.as_ref()
+                    {
+                        let json = pyvalue_to_json(value);
 
-                            // Validate against schema if set
-                            if let Err(validation_error) = self.validate_against_schema(&json) {
-                                self.emit(AgentEvent::Error {
-                                    message: format!("Schema validation failed: {}", validation_error),
-                                });
+                        // Validate against schema if set
+                        if let Err(validation_error) = self.validate_against_schema(&json) {
+                            self.emit(AgentEvent::Error {
+                                message: format!("Schema validation failed: {}", validation_error),
+                            });
 
+                            if iterations >= self.config.max_iterations {
+                                return Err(Error::Deserialization(format!(
+                                    "Schema validation failed: {}",
+                                    validation_error
+                                )));
+                            }
+
+                            drop(fa);
+                            if let Ok(mut fa) = self.finish_answer.lock() {
+                                *fa = None;
+                            }
+
+                            self.messages.push(Message {
+                                role: Role::User,
+                                content: format!(
+                                    "Your output did not match the expected schema.\n\n{}\n\nPlease fix and try again.",
+                                    validation_error
+                                ),
+                                name: None,
+                                tool_call_id: None,
+                            });
+                            continue;
+                        }
+
+                        self.emit(AgentEvent::Finish {
+                            value: value.clone(),
+                        });
+
+                        match serde_json::from_value::<T>(json.clone()) {
+                            Ok(result) => {
+                                self.save_to_context(&result);
+                                return Ok(result);
+                            }
+                            Err(e) => {
                                 if iterations >= self.config.max_iterations {
                                     return Err(Error::Deserialization(format!(
-                                        "Schema validation failed: {}",
-                                        validation_error
+                                        "Invalid finish() output: {}",
+                                        e
                                     )));
                                 }
 
@@ -842,48 +879,13 @@ impl Agent {
                                 self.messages.push(Message {
                                     role: Role::User,
                                     content: format!(
-                                        "Your output did not match the expected schema.\n\n{}\n\nPlease fix and try again.",
-                                        validation_error
+                                        "Error parsing your finish() output:\n\n{}\n\nYour output:\n```\n{}\n```\n\nPlease fix and try again.",
+                                        e, json
                                     ),
                                     name: None,
                                     tool_call_id: None,
                                 });
                                 continue;
-                            }
-
-                            self.emit(AgentEvent::Finish {
-                                value: value.clone(),
-                            });
-
-                            match serde_json::from_value::<T>(json.clone()) {
-                                Ok(result) => {
-                                    self.save_to_context(&result);
-                                    return Ok(result);
-                                }
-                                Err(e) => {
-                                    if iterations >= self.config.max_iterations {
-                                        return Err(Error::Deserialization(format!(
-                                            "Invalid finish() output: {}",
-                                            e
-                                        )));
-                                    }
-
-                                    drop(fa);
-                                    if let Ok(mut fa) = self.finish_answer.lock() {
-                                        *fa = None;
-                                    }
-
-                                    self.messages.push(Message {
-                                        role: Role::User,
-                                        content: format!(
-                                            "Error parsing your finish() output:\n\n{}\n\nYour output:\n```\n{}\n```\n\nPlease fix and try again.",
-                                            e, json
-                                        ),
-                                        name: None,
-                                        tool_call_id: None,
-                                    });
-                                    continue;
-                                }
                             }
                         }
                     }
@@ -1008,14 +1010,14 @@ impl Agent {
 
                 // Check if finish() was called
                 if output.contains(FINISH_MARKER) {
-                    if let Ok(fa) = self.finish_answer.lock() {
-                        if let Some(value) = fa.as_ref() {
-                            let result_str = pyvalue_to_string(value);
-                            self.emit(AgentEvent::Finish {
-                                value: value.clone(),
-                            });
-                            return Ok(result_str);
-                        }
+                    if let Ok(fa) = self.finish_answer.lock()
+                        && let Some(value) = fa.as_ref()
+                    {
+                        let result_str = pyvalue_to_string(value);
+                        self.emit(AgentEvent::Finish {
+                            value: value.clone(),
+                        });
+                        return Ok(result_str);
                     }
                     return Ok(String::new());
                 }
