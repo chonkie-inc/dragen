@@ -907,6 +907,139 @@ impl Agent {
         }
     }
 
+    /// Chat with the agent, preserving conversation history across calls.
+    ///
+    /// Unlike `run()`, which clears history and returns a typed `T`, `chat()`
+    /// preserves message history for multi-turn conversation and returns a `String`.
+    ///
+    /// Termination conditions per call:
+    /// - **No code block and no finish block** → conversational response → return text
+    /// - **Code block** → execute in sandbox, append output, continue looping
+    /// - **`finish()` called** → return the finish value as a string
+    /// - **`<finish>` block** → return the content as a string
+    pub async fn chat(&mut self, message: &str) -> Result<String> {
+        // Lazy-initialize on first call
+        if self.messages.is_empty() {
+            self.ensure_finish_tool();
+            self.messages.push(Message {
+                role: Role::System,
+                content: self.system_prompt(),
+                name: None,
+                tool_call_id: None,
+            });
+        }
+
+        // Clear any previous finish answer
+        if let Ok(mut fa) = self.finish_answer.lock() {
+            *fa = None;
+        }
+
+        // Append user message (never clear history)
+        self.messages.push(Message {
+            role: Role::User,
+            content: message.to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+
+        let mut iterations = 0;
+
+        loop {
+            iterations += 1;
+
+            if iterations > self.config.max_iterations {
+                self.emit(AgentEvent::Error {
+                    message: format!("Max iterations ({}) reached", self.config.max_iterations),
+                });
+                return Err(Error::MaxIterations(self.config.max_iterations));
+            }
+
+            self.emit(AgentEvent::IterationStart {
+                iteration: iterations,
+                max_iterations: self.config.max_iterations,
+            });
+
+            self.emit(AgentEvent::LLMRequest {
+                message_count: self.messages.len(),
+            });
+
+            let response = self.call_llm().await?;
+            let text = response.text.clone();
+
+            self.emit(AgentEvent::LLMResponse {
+                content: text.clone(),
+                tokens_used: None,
+            });
+
+            // Extract and emit thinking if present
+            if let Some(thinking) = self.extract_thinking(&text) {
+                self.emit(AgentEvent::Thinking {
+                    content: thinking,
+                });
+            }
+
+            self.messages.push(Message {
+                role: Role::Assistant,
+                content: text.clone(),
+                name: None,
+                tool_call_id: None,
+            });
+
+            // Check for direct <finish>JSON</finish> block
+            if let Some(finish_content) = self.extract_finish(&text) {
+                self.emit(AgentEvent::Finish {
+                    value: PyValue::Str(finish_content.clone()),
+                });
+                return Ok(finish_content);
+            }
+
+            // Check for code block
+            if let Some(code) = self.extract_code(&text) {
+                self.emit(AgentEvent::CodeGenerated { code: code.clone() });
+
+                let output = self.execute_code(&code);
+                let success = !output.starts_with("Error:");
+
+                self.emit(AgentEvent::CodeExecuted {
+                    code: code.clone(),
+                    output: output.clone(),
+                    success,
+                });
+
+                // Check if finish() was called
+                if output.contains(FINISH_MARKER) {
+                    if let Ok(fa) = self.finish_answer.lock() {
+                        if let Some(value) = fa.as_ref() {
+                            let result_str = pyvalue_to_string(value);
+                            self.emit(AgentEvent::Finish {
+                                value: value.clone(),
+                            });
+                            return Ok(result_str);
+                        }
+                    }
+                    return Ok(String::new());
+                }
+
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: format!("Execution output:\n```\n{}\n```", output),
+                    name: None,
+                    tool_call_id: None,
+                });
+            } else {
+                // No code block or finish block — conversational response
+                return Ok(text);
+            }
+        }
+    }
+
+    /// Clear the conversation history.
+    ///
+    /// The next `chat()` call will re-initialize the system prompt.
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
     /// Run multiple tasks in parallel using cloned agents.
     ///
     /// Each task is run on a fresh clone of this agent, allowing parallel execution.
@@ -1071,5 +1204,97 @@ I hope this helps!"#;
 
         let output = agent.execute_code("undefined_var");
         assert!(output.starts_with("Error:"));
+    }
+
+    #[test]
+    fn test_chat_initializes_system_prompt() {
+        let mut agent = Agent::with_model("test");
+        assert!(agent.messages().is_empty());
+
+        // Simulate what chat() does on first call: lazy-init
+        agent.ensure_finish_tool();
+        agent.messages.push(Message {
+            role: Role::System,
+            content: agent.system_prompt(),
+            name: None,
+            tool_call_id: None,
+        });
+        agent.messages.push(Message {
+            role: Role::User,
+            content: "hello".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages()[0].role, Role::System);
+        assert_eq!(agent.messages()[1].role, Role::User);
+        assert_eq!(agent.messages()[1].content, "hello");
+    }
+
+    #[test]
+    fn test_chat_preserves_history() {
+        let mut agent = Agent::with_model("test");
+
+        // Simulate two chat turns by manually building messages
+        agent.messages.push(Message {
+            role: Role::System,
+            content: agent.system_prompt(),
+            name: None,
+            tool_call_id: None,
+        });
+        agent.messages.push(Message {
+            role: Role::User,
+            content: "first".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+        agent.messages.push(Message {
+            role: Role::Assistant,
+            content: "response 1".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+        let len_after_first = agent.messages().len();
+
+        // Second turn appends, doesn't clear
+        agent.messages.push(Message {
+            role: Role::User,
+            content: "second".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+        agent.messages.push(Message {
+            role: Role::Assistant,
+            content: "response 2".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+
+        assert!(agent.messages().len() > len_after_first);
+        assert_eq!(agent.messages().len(), 5);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut agent = Agent::with_model("test");
+
+        // Add some messages
+        agent.messages.push(Message {
+            role: Role::System,
+            content: "system".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+        agent.messages.push(Message {
+            role: Role::User,
+            content: "hello".to_string(),
+            name: None,
+            tool_call_id: None,
+        });
+        assert_eq!(agent.messages().len(), 2);
+
+        agent.clear();
+        assert!(agent.messages().is_empty());
     }
 }
